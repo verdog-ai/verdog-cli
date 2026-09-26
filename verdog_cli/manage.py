@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import dataclasses
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -139,7 +140,7 @@ def _logout(arguments: argparse.Namespace) -> int:
             f"verdog: the service could not be reached ("
             f"{error}); forgetting locally."
         )
-    if session.backend_origin() is None:
+    if os.environ.get("VERDOG_SESSION_TOKEN_STDIN") is None:
         session.forget()
     print("Signed out.")
     return 0
@@ -169,6 +170,9 @@ def _clone(arguments: argparse.Namespace) -> int:
     so Git fetches the dependencies with the user's own HTTPS credentials or
     existing SSH setup.
     """
+    origin = session.validate_origin(
+        arguments.origin or session.backend_origin() or local.DEFAULT_ORIGIN
+    )
     owner, name = local.repository_address(str(arguments.repository))
     address = f"{owner}/{name}"
     destination = pathlib.Path(str(arguments.destination or name)).resolve()
@@ -197,12 +201,7 @@ def _clone(arguments: argparse.Namespace) -> int:
         "--recursive",
         command=local.git,
     )
-    local.write_config(
-        destination,
-        str(
-            arguments.origin or session.backend_origin() or local.DEFAULT_ORIGIN
-        ),
-    )
+    local.write_config(destination, origin)
     print(f"Cloned {address} into {destination}")
     print("Next: `verdog sync`, then `verdog check`.")
     return 0
@@ -333,6 +332,9 @@ def _init(arguments: argparse.Namespace) -> int:
     into a project, so leaving it to the author would make `init` a verb
     that produces something unusable.
     """
+    origin = session.validate_origin(
+        arguments.origin or session.backend_origin() or local.DEFAULT_ORIGIN
+    )
     root = pathlib.Path(str(arguments.directory or ".")).resolve()
     if (root / "project.json").exists():
         raise local.WorkspaceError(f"{root} already holds a project.json")
@@ -367,9 +369,7 @@ def _init(arguments: argparse.Namespace) -> int:
     gitignore = root / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(GITIGNORE, encoding="utf-8")
-    origin = arguments.origin or session.backend_origin()
-    if origin:
-        local.write_config(root, str(origin))
+    local.write_config(root, origin)
 
     print(f"Started {package} in {root}")
     print(f"  workflow {ENTRY_WORKFLOW!r}: enter -> exit, with a failure port")
@@ -619,8 +619,10 @@ def publish_workflow(arguments: argparse.Namespace) -> int:
 
 def _describe(arguments: argparse.Namespace) -> int:
     """Serialize the exact metadata publication and inspection compare."""
+    root = getattr(arguments, "project", None) or pathlib.Path.cwd()
     description = cli_catalogue.describe_workflow(
-        _here(), getattr(arguments, "workflow", None)
+        local.open_clone(pathlib.Path(root)),
+        getattr(arguments, "workflow", None),
     )
     payload = description.as_json()
     if getattr(arguments, "as_json", False):
@@ -2035,7 +2037,7 @@ def _token(arguments: argparse.Namespace) -> int:
     clone = _here()
     owner, name = clone.require_repository()
     address = f"{owner}/{name}"
-    client = session.account()
+    client = session.account(clone.origin)
     action = str(arguments.action)
     if action == "create":
         issued = client.create_token(address, str(arguments.name or "cli"))
@@ -2144,6 +2146,11 @@ def register(commands: Any) -> None:
         "workflow",
         nargs="?",
         help="project-local workflow path; defaults to the entry workflow",
+    )
+    describe.add_argument(
+        "--project",
+        type=pathlib.Path,
+        help="read this project instead of the current directory",
     )
     describe.add_argument(
         "--json",

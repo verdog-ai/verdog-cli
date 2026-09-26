@@ -363,12 +363,8 @@ def _sync_one(
 ) -> int:
     """Create or refresh one workflow definition's environment.
 
-    `only_binary` refuses source distributions, which is what makes this
-    safe to run over code somebody else published. Installing an sdist
-    executes its build backend; installing a wheel unpacks it. A reader
-    browsing a workflow has consented to *reading* it, and a type checker
-    never imports a package -- it reads source and stubs -- so wheels are
-    enough to resolve every import without running a line of anyone's code.
+    `only_binary` restricts package selection to wheels. Installation still
+    requires trusted dependencies: wheels may contain Python startup hooks.
     """
     # Resolve and validate the complete specification before clearing a usable
     # environment.
@@ -384,9 +380,6 @@ def _sync_one(
             raise local.WorkspaceError(f"no interpreter in {environment}")
         site_packages = _site_packages(environment)
         _seed_distributions(site_packages, ("verdog-runtime",))
-        (site_packages / SOURCE_LINKS).write_text(
-            "".join(f"{root}\n" for root in source_roots), encoding="utf-8"
-        )
         runtime_requirements = cast(
             list[str], specification["runtime_requirements"]
         )
@@ -403,6 +396,7 @@ def _sync_one(
             status = _install(
                 [
                     str(interpreter),
+                    "-I",
                     "-m",
                     "pip",
                     "install",
@@ -412,7 +406,7 @@ def _sync_one(
                     f"verdog-runtime=={runtime['version']}",
                     *requirements,
                 ],
-                clone.root,
+                environment,
             )
             if status:
                 print(
@@ -423,6 +417,10 @@ def _sync_one(
                     file=sys.stderr,
                 )
                 return status
+        # Keep authored startup hooks out of the installer interpreter.
+        (site_packages / SOURCE_LINKS).write_text(
+            "".join(f"{root}\n" for root in source_roots), encoding="utf-8"
+        )
         (environment / ENVIRONMENT_MARKER).write_text(
             json.dumps(specification, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

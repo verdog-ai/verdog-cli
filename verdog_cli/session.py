@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import datetime
 import functools
@@ -11,6 +13,7 @@ import os
 import pathlib
 import sys
 import urllib.parse
+from collections.abc import Generator
 from typing import Any, Final, cast
 
 from verdog_cli import api
@@ -97,28 +100,43 @@ def forget() -> None:
     _path().unlink(missing_ok=True)
 
 
-def account() -> api.Service:
-    """Return the authenticated account client."""
-    origin = backend_origin()
-    if origin is not None:
-        if os.environ.get("VERDOG_SESSION_TOKEN_STDIN") != "1":
+def account(origin: str | None = None) -> api.Service:
+    """Authenticate only at the selected destination, without redirecting it."""
+    selected = backend_origin() or (validate_origin(origin) if origin else None)
+    handoff = os.environ.get("VERDOG_SESSION_TOKEN_STDIN")
+    if handoff == "1":
+        inherited = _inherited_origin()
+        if inherited is None:
             raise SessionError(
-                "not signed in to the configured backend; sign in from VS Code"
+                "a backend origin is required for stdin credentials"
+            )
+        if selected != inherited:
+            raise SessionError(
+                "the configured backend changed after receiving its session"
             )
         client = _stdin_account()
-        if client.origin != origin:
+        if client.origin != selected:
             raise SessionError(
                 "the configured backend changed after receiving its session"
             )
         return client
+    if handoff is not None:
+        raise SessionError(
+            "not signed in to the configured backend; sign in from VS Code"
+        )
     login = load()
-    return api.Service(login.origin, login.token)
+    saved_origin = validate_origin(login.origin)
+    if selected is not None and saved_origin != selected:
+        raise SessionError(
+            f"not signed in to {selected}; run `verdog login {selected}`"
+        )
+    return api.Service(selected or saved_origin, login.token)
 
 
 @functools.cache
 def _stdin_account() -> api.Service:
     """Read one ephemeral, origin-bound service session from stdin."""
-    origin = backend_origin()
+    origin = _inherited_origin()
     if origin is None:
         raise SessionError("a backend origin is required for stdin credentials")
     try:
@@ -143,16 +161,23 @@ def credential(
     *,
     anonymous: bool = False,
 ) -> api.Service:
-    """Prefer editor credentials, then the saved session or clone token."""
-    selected = backend_origin()
-    if selected is not None:
-        return api.Service(selected) if anonymous else account()
+    """Select a destination first, then use only credentials bound to it."""
+    selected = backend_origin() or (validate_origin(origin) if origin else None)
+    if anonymous:
+        if selected is None:
+            raise SessionError("a backend origin is required")
+        return api.Service(selected)
     try:
-        return account()
+        return account(selected)
     except SessionError:
-        if origin is None or (token is None and not anonymous):
+        if (
+            os.environ.get("VERDOG_SESSION_TOKEN_STDIN") is not None
+            or origin is None
+            or token is None
+            or selected != validate_origin(origin)
+        ):
             raise
-        return api.Service(origin, token)
+        return api.Service(validate_origin(origin), token)
 
 
 DISCLOSURE: Final = """\
@@ -179,10 +204,31 @@ What Verdog shares:
 "Printed before accepting a token so the destination and data use are explicit."
 
 
-def backend_origin() -> str | None:
-    """Read the editor origin without reusing saved credentials."""
+_COMMAND_ORIGIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdog_command_origin", default=None
+)
+
+
+@contextlib.contextmanager
+def command_origin(origin: str | None) -> Generator[None]:
+    """Scope a command override without relabelling an inherited stdin token."""
+    token = _COMMAND_ORIGIN.set(
+        validate_origin(origin) if origin is not None else None
+    )
+    try:
+        yield
+    finally:
+        _COMMAND_ORIGIN.reset(token)
+
+
+def _inherited_origin() -> str | None:
     origin = os.environ.get("VERDOG_BACKEND_ORIGIN")
     return validate_origin(origin) if origin else None
+
+
+def backend_origin() -> str | None:
+    """Return the command override or inherited backend selection."""
+    return _COMMAND_ORIGIN.get() or _inherited_origin()
 
 
 def validate_origin(origin: str) -> str:

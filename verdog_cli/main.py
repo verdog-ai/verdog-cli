@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -19,7 +18,7 @@ from verdog_cli import runs as cli_runs
 
 
 def _service(clone: local.Clone) -> api.Service:
-    """Return a compiler client; authentication is optional."""
+    """Return an anonymous client for the selected compiler."""
     return session.credential(clone.origin, clone.token, anonymous=True)
 
 
@@ -377,8 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="verdog", description=__doc__)
     parser.add_argument(
         "--backend-origin",
-        help="editor backend origin; compiler calls are "
-        "anonymous, sessions arrive through stdin",
+        help="override the backend origin; credentials must match this service",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -426,8 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--only-binary",
         action="store_true",
         dest="only_binary",
-        help="refuse source distributions, so nothing is "
-        "built and no build code runs",
+        help="request wheels only; dependencies must still be trusted",
     )
     provision.add_argument(
         "--json",
@@ -616,12 +613,14 @@ def main(argv: list[str] | None = None) -> int:
     """Run the CLI and report expected user errors without a traceback."""
     arguments = parse_arguments(argv)
     try:
-        if arguments.backend_origin is not None:
-            os.environ["VERDOG_BACKEND_ORIGIN"] = session.validate_origin(
-                arguments.backend_origin
+        origin = getattr(arguments, "origin", None)
+        if origin is None:
+            origin = arguments.backend_origin
+        with session.command_origin(origin):
+            handler = cast(
+                Callable[[argparse.Namespace], int], arguments.handler
             )
-        handler = cast(Callable[[argparse.Namespace], int], arguments.handler)
-        return handler(arguments)
+            return handler(arguments)
     except (
         api.ServiceError,
         local.WorkspaceError,

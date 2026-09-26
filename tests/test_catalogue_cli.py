@@ -40,10 +40,12 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+@pytest.mark.parametrize("explicit_project", [False, True])
 def test_describe_json_is_canonical_and_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    explicit_project: bool,
 ) -> None:
     from verdog_cli import main as cli
 
@@ -56,10 +58,16 @@ def test_describe_json_is_canonical_and_read_only(
     requirements.write_text(
         "zeta >= 2\nrequests [security] >= 2\n", encoding="utf-8"
     )
+    for relative in ("sitecustomize.py", "pip.py", "src/sitecustomize.py"):
+        (clone.root / relative).write_text(
+            'raise AssertionError("must not execute project code")\n',
+            encoding="utf-8",
+        )
     before = _snapshot(clone.root)
-    monkeypatch.chdir(clone.root)
+    monkeypatch.chdir(tmp_path if explicit_project else clone.root)
+    project_option = ["--project", str(clone.root)] if explicit_project else []
 
-    assert cli.main(["describe", "main", "--json"]) == 0
+    assert cli.main(["describe", "main", *project_option, "--json"]) == 0
 
     captured = capsys.readouterr()
     assert captured.err == ""

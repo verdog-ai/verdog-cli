@@ -51,10 +51,10 @@ def test_compiler_commands_need_no_login(
         json.dumps(blank_graph("test.project", "Anonymous compiler")),
         encoding="utf-8",
     )
-    write_config(tmp_path, "https://compiler.test")
+    write_config(tmp_path, "https://compiler.test", "project-secret")
+    store(Login("https://old-session.test", "old-session-secret", "ada"))
     if configured_origin is not None:
         write_config(tmp_path, "https://old-project.test", "old-project-secret")
-        store(Login("https://old-session.test", "old-session-secret", "ada"))
         monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", configured_origin)
         monkeypatch.setenv("VERDOG_SESSION_TOKEN_STDIN", "1")
         monkeypatch.setattr(
@@ -89,10 +89,16 @@ def test_compiler_fallback_preserves_configured_service_and_catalogue_auth(
 ) -> None:
     assert credential("https://project.test", anonymous=True).token is None
     store(Login("https://saved.test", "verdog-secret", "ada"))
-    assert (
-        credential("https://project.test", anonymous=True).origin
-        == "https://saved.test"
-    )
+    compiler = credential("https://project.test", anonymous=True)
+    assert compiler.origin == "https://project.test"
+    assert compiler.token is None
+    with pytest.raises(
+        SessionError, match="not signed in to https://project.test"
+    ):
+        credential("https://project.test")
+    clone_client = credential("https://project.test", "project-secret")
+    assert clone_client.origin == "https://project.test"
+    assert clone_client.token == "project-secret"
     forget()
     (tmp_path / ".git").mkdir()
     (tmp_path / "project.json").write_text(

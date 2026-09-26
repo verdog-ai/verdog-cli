@@ -48,6 +48,29 @@ uses the hosted compiler and local Python type checking. `run` launches the runt
 with the selected workflow's interpreter. Run arguments, credentials, backend
 configuration, and run directories retain their existing formats.
 
+`describe main --project /path/to/project --json` reads graph and requirement
+metadata without importing project code. Inspection tools should launch the CLI
+from a trusted directory and pass the project path explicitly. Preparing or
+selecting a Python environment belongs after importing into a trusted project.
+`sync --only-binary` requests wheels; it is not a sandbox, and dependencies must
+still be trusted. Sync isolates installer startup and adds project source paths
+only after installation succeeds.
+
+Backend selection is command `--origin` (or the `login` positional origin), then
+`--backend-origin`, then `VERDOG_BACKEND_ORIGIN`, then the project's
+`.git/verdog.json` origin or the hosted default. `init` and `clone` persist the
+selected origin. Global account commands without an explicit backend use the
+saved account's origin. A saved login never redirects a project's requests;
+compiler calls are anonymous, and authenticated commands accept only credentials
+for their selected origin. Standalone explicit backend overrides can use a
+matching saved session. Repository tokens cannot administer account tokens.
+
+Editor integrations set `VERDOG_SESSION_TOKEN_STDIN=1` for an ephemeral session
+bound to the inherited `VERDOG_BACKEND_ORIGIN`, or `0` when no editor session is
+available. Both modes exclude saved terminal and project credentials. A command
+override cannot relabel an incoming session token for another origin. Omit the
+marker for standalone saved-session authentication.
+
 Use `verdog --help` or `verdog <command> --help` for the full command interface.
 
 ## Development

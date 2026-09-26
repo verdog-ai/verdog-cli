@@ -314,7 +314,7 @@ def test_workflow_rebuild_recovers_after_each_failure(
             raise OSError("injected seed failure")
 
     def install(command: list[str], cwd: Path) -> int:
-        assert cwd == clone.root
+        assert cwd == clone.environment(definition)
         assert (
             f"verdog-runtime=={metadata.version('verdog-runtime')}" in command
         )
@@ -1330,3 +1330,49 @@ def test_workflow_requirements_cannot_override_the_managed_runtime(
         _sync_one(clone, definition, only_binary=False)
 
     assert sentinel.read_text("utf-8") == "mine"
+
+
+@pytest.mark.parametrize(
+    "relative", ["pip.py", "sitecustomize.py", "src/sitecustomize.py"]
+)
+def test_installer_does_not_import_project_startup_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    clone = _clone(tmp_path, [])
+    definition = _root_definition(clone)
+    marker = tmp_path / "authored-code-ran"
+    (clone.root / relative).write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(clone.root / "src"))
+    invocations: list[list[str]] = []
+
+    def offline_install(command: list[str], cwd: Path) -> int:
+        invocations.append(command)
+        assert cwd == clone.environment(definition)
+        assert not (
+            _site_packages(clone.environment(definition))
+            / "_verdog_sources.pth"
+        ).exists()
+        # Preserve the actual interpreter flags; replace installation with a
+        # local pip version query so the regression needs no package download.
+        finished = subprocess.run(
+            [*command[: command.index("install")], "--version"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert finished.returncode == 0, finished.stderr
+        assert finished.stdout.startswith("pip ")
+        return finished.returncode
+
+    monkeypatch.setattr("verdog_cli.sync._install", offline_install)
+    assert _sync_one(clone, definition, only_binary=True) == 0
+    assert len(invocations) == 1
+    assert "--only-binary" in invocations[0]
+    assert not marker.exists()
+    assert (
+        _site_packages(clone.environment(definition)) / "_verdog_sources.pth"
+    ).read_text("utf-8") == f"{clone.root / 'src'}\n"

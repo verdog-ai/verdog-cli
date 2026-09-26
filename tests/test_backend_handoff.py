@@ -56,11 +56,12 @@ def test_ephemeral_session_is_read_once_and_bound_to_its_origin(
     assert captured.out == captured.err == ""
 
 
-def test_configured_backend_never_falls_back_to_saved_or_project_tokens(
+def test_editor_without_session_never_uses_saved_or_project_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store(Login("https://configured.test", "saved-secret", "ada"))
     monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", "https://configured.test")
+    monkeypatch.setenv("VERDOG_SESSION_TOKEN_STDIN", "0")
     monkeypatch.setattr("sys.stdin", object())
     with pytest.raises(SessionError, match="sign in from VS Code"):
         credential("https://configured.test", "project-secret")
@@ -274,12 +275,18 @@ def test_new_projects_persist_the_selected_backend(
             (root / ".git").mkdir()
         return ""
 
-    def generated(clone: Clone) -> int:
-        assert clone.origin == expected
-        return 0
+    received: list[str] = []
 
+    def respond(request: Request, *, timeout: float) -> BytesIO:
+        assert timeout > 0
+        assert request.get_header("Authorization") is None
+        received.append(request.full_url)
+        return BytesIO(b'{"files":{},"diagnostics":[]}')
+
+    monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", "https://inherited.test")
+    store(Login("https://saved.test", "saved-secret", "ada"))
     monkeypatch.setattr(manage.local, "git", fake_git)
-    monkeypatch.setattr(cli, "generate_clone", generated)
+    monkeypatch.setattr("verdog_cli.api.urlopen", respond)
     arguments = ["--backend-origin", selected, command]
     arguments += (
         ["Project", str(destination), "--package", "ada.project"]
@@ -294,3 +301,94 @@ def test_new_projects_persist_the_selected_backend(
     ) == {
         "origin": expected,
     }
+    assert received == (
+        [f"{expected}/api/v1/check"] if command == "init" else []
+    )
+
+
+@pytest.mark.parametrize("selection", ["flag", "environment"])
+def test_standalone_override_uses_only_a_matching_saved_session(
+    monkeypatch: pytest.MonkeyPatch,
+    selection: str,
+) -> None:
+    selected = "https://selected.test"
+    prefix = ["--backend-origin", selected] if selection == "flag" else []
+    if selection == "environment":
+        monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", selected)
+    monkeypatch.setattr("sys.stdin", object())
+    saved = store(Login("https://other.test", "wrong-secret", "ada"))
+    before = saved.read_bytes()
+    assert cli.main([*prefix, "whoami"]) == 1
+    assert saved.read_bytes() == before
+    store(Login(selected, "matching-secret", "ada"))
+    requests: list[str] = []
+
+    def respond(request: Request, *, timeout: float) -> BytesIO:
+        assert timeout > 0
+        assert request.get_header("Authorization") == "Bearer matching-secret"
+        requests.append(request.full_url)
+        return BytesIO(b'{"user":{"login":"ada"}}')
+
+    monkeypatch.setattr("verdog_cli.api.urlopen", respond)
+    assert cli.main([*prefix, "whoami"]) == 0
+    assert cli.main([*prefix, "logout"]) == 0
+    assert requests == [f"{selected}/api/v1/me", f"{selected}/api/v1/logout"]
+    with pytest.raises(SessionError, match="not signed in"):
+        load()
+
+
+def test_backend_flag_cannot_rebind_a_stdin_session(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", "https://inherited.test")
+    monkeypatch.setenv("VERDOG_SESSION_TOKEN_STDIN", "1")
+    monkeypatch.setattr("sys.stdin", object())
+    assert cli.main(["--backend-origin", "https://other.test", "whoami"]) == 1
+    assert "backend changed" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", StringIO("inherited-secret"))
+    assert account().origin == "https://inherited.test"
+
+
+@pytest.mark.parametrize("command", ["init", "clone"])
+def test_invalid_new_project_origin_is_rejected_before_creating_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str
+) -> None:
+    destination = tmp_path / "project"
+    monkeypatch.chdir(tmp_path)
+    arguments = (
+        ["init", "Project", str(destination), "--package", "ada.project"]
+        if command == "init"
+        else ["clone", "ada/project", str(destination)]
+    )
+    assert cli.main([*arguments, "--origin", "http://unsafe.test"]) == 1
+    assert not destination.exists()
+
+
+def test_project_token_administration_requires_a_matching_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    manage.local.write_config(tmp_path, "https://project.test", "clone-secret")
+    monkeypatch.chdir(tmp_path)
+    def repository(_clone: Clone) -> tuple[str, str]:
+        return "ada", "tools"
+
+    monkeypatch.setattr(Clone, "require_repository", repository)
+    store(Login("https://other.test", "wrong-secret", "ada"))
+    assert cli.main(["token", "list"]) == 1
+    store(Login("https://project.test", "account-secret", "ada"))
+    received: list[str] = []
+
+    def respond(request: Request, *, timeout: float) -> BytesIO:
+        assert timeout > 0
+        assert request.get_header("Authorization") == "Bearer account-secret"
+        received.append(request.full_url)
+        return BytesIO(b'{"tokens":[]}')
+
+    monkeypatch.setattr("verdog_cli.api.urlopen", respond)
+    assert cli.main(["token", "list"]) == 0
+    assert received == [
+        "https://project.test/api/v1/tokens?repository=ada/tools"
+    ]
