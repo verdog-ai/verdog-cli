@@ -47,7 +47,7 @@ def _runtime(
     clone: local.Clone, workflow_id: str | None, /
 ) -> tuple[str, str, pathlib.Path, dict[str, str]]:
     workflow = clone.workflow_definition(workflow_id)
-    environment = sync.require_current_environment(clone, workflow)
+    environment = sync.require_current_workflow_environments(clone, workflow)
     interpreter = local.interpreter_in(environment)
     if interpreter is None:
         raise local.WorkspaceError(

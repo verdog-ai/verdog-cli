@@ -33,6 +33,7 @@ from verdog_cli.sync import (
     _sync_editor_environment,  # pyright: ignore[reportPrivateUsage]
     _sync_one,  # pyright: ignore[reportPrivateUsage]
     require_current_environment,
+    require_current_workflow_environments,
     sync,
 )
 
@@ -1376,3 +1377,147 @@ def test_installer_does_not_import_project_startup_code(
     assert (
         _site_packages(clone.environment(definition)) / "_verdog_sources.pth"
     ).read_text("utf-8") == f"{clone.root / 'src'}\n"
+
+
+@pytest.mark.parametrize("operation", ["run", "operate"])
+def test_launch_preflights_workflows_reached_through_external_subroutines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    root = _manifest(
+        tmp_path / "root",
+        "test.root",
+        externals=[
+            _pin("dependency.library", "publisher.library", "a" * 40),
+            _pin("unused.missing", "publisher.missing", "b" * 40),
+        ],
+        subroutine=_subroutine(
+            "main",
+            nodes=[
+                {
+                    "kind": "subroutine_call",
+                    "operation": {"target": "dependency.library/main__shared"},
+                }
+            ],
+        ),
+    )
+    library = _manifest(
+        root.root / "external/dependency/library",
+        "publisher.library",
+        externals=[_pin("dependency.worker", "publisher.worker", "c" * 40)],
+        subroutine=_subroutine(
+            "main",
+            subroutines=[
+                _subroutine(
+                    "shared",
+                    workflows=[
+                        {
+                            "id": "worker",
+                            "external": {
+                                "alias": "dependency.worker",
+                                "workflow": "main",
+                            },
+                        }
+                    ],
+                    nodes=[
+                        {
+                            "kind": "workflow_call",
+                            "operation": {"target": "main__shared__worker"},
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    worker = _manifest(
+        library.root / "external/dependency/worker", "publisher.worker"
+    )
+
+    def mark_current(owner: Clone) -> None:
+        definition = _root_definition(owner)
+        environment = owner.environment(definition)
+        environment.mkdir(parents=True, exist_ok=True)
+        (environment / ENVIRONMENT_MARKER).write_text(
+            json.dumps(_environment_spec(owner, definition)[0]),
+            encoding="utf-8",
+        )
+
+    mark_current(root)
+    mark_current(worker)
+    requirements = (
+        worker.root / _root_definition(worker).source / "requirements.txt"
+    )
+    requirements.write_text("six==1.17.0\n", encoding="utf-8")
+    interpreter = root.environment(_root_definition(root)) / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    )
+    interpreter.parent.mkdir()
+    interpreter.touch()
+    launches: list[list[str]] = []
+
+    def launch(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        launches.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("verdog_cli.runner.subprocess.run", launch)
+
+    def invoke() -> int:
+        if operation == "run":
+            return runner.run(root)
+        return runner.operate(
+            root,
+            runner.LifecycleRequest(
+                operation="restart",
+                source=tmp_path / "output",
+                workflow_id="main",
+                sessions="fresh",
+                arguments_mode="reused",
+            ),
+        )
+
+    with pytest.raises(WorkspaceError, match="worker.*missing or stale"):
+        invoke()
+    assert launches == []
+    mark_current(worker)
+    assert invoke() == 0
+    assert len(launches) == 1
+    assert not library.environment(_root_definition(library)).exists()
+    assert not (root.root / "external/unused/missing").exists()
+
+
+def test_reachable_local_workflow_preflight_handles_recursive_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _manifest(
+        tmp_path / "root",
+        "test.root",
+        subroutine=_subroutine(
+            "main",
+            workflows=[_workflow("main__child")],
+            nodes=[
+                {
+                    "kind": "workflow_call",
+                    "operation": {"target": "main__child"},
+                }
+            ],
+            subroutines=[
+                _subroutine(
+                    "child",
+                    nodes=[
+                        {
+                            "kind": "workflow_call",
+                            "operation": {"target": "main"},
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    checked: list[str] = []
+
+    def require(owner: Clone, definition: LocalDefinition) -> Path:
+        checked.append(definition.local_id)
+        return owner.environment(definition)
+
+    monkeypatch.setattr("verdog_cli.sync.require_current_environment", require)
+    require_current_workflow_environments(root, _root_definition(root))
+    assert checked == ["main", "main__child"]

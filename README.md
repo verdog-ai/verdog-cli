@@ -48,6 +48,14 @@ uses the hosted compiler and local Python type checking. `run` launches the runt
 with the selected workflow's interpreter. Run arguments, credentials, backend
 configuration, and run directories retain their existing formats.
 
+A successful `verdog check` (including `--json`) writes a local receipt to
+`.verdog/check.json` for editor integrations. Version 1 records the graph hash,
+diagnostics, and SHA-256 hashes of the checked source/configuration files; absent
+optional files have a `null` hash. It stores paths and hashes, not source content,
+and stays on this machine. Consumers must verify those hashes before showing a
+passed check. A new check removes the previous receipt before starting; failed
+or interrupted checks leave no success receipt.
+
 `describe main --project /path/to/project --json` reads graph and requirement
 metadata without importing project code. Inspection tools should launch the CLI
 from a trusted directory and pass the project path explicitly. Preparing or

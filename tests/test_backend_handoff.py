@@ -372,6 +372,7 @@ def test_project_token_administration_requires_a_matching_account(
     (tmp_path / "project.json").write_text("{}", encoding="utf-8")
     manage.local.write_config(tmp_path, "https://project.test", "clone-secret")
     monkeypatch.chdir(tmp_path)
+
     def repository(_clone: Clone) -> tuple[str, str]:
         return "ada", "tools"
 

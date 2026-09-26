@@ -102,11 +102,25 @@ def check_clone(clone: local.Clone, *, as_json: bool = False) -> int:
 def check_clone_result(
     clone: local.Clone, *, as_json: bool = False
 ) -> tuple[int, dict[str, Any]]:
-    """Check a clone and return both its status and compiler result."""
+    """Check a clone and record success against its checked sources."""
+    with local.workspace_lock(clone.root, "check"):
+        clone.write_check_receipt(None)
+        return _check_clone_result(clone, as_json=as_json)
+
+
+def _check_clone_result(
+    clone: local.Clone, *, as_json: bool
+) -> tuple[int, dict[str, Any]]:
     files = clone.files()
     result = _service(clone).check(files)
-    written = clone.write(
-        cast("dict[str, str | None]", result.get("files") or {}), expected=files
+    projection = cast("dict[str, str | None]", result.get("files") or {})
+    written = clone.write(projection, expected=files)
+    sources = clone.check_sources(
+        expected={
+            path: content
+            for path, content in (files | projection).items()
+            if content is not None
+        }
     )
     diagnostics = cast(
         list[Any],
@@ -114,24 +128,37 @@ def check_clone_result(
         if isinstance(result.get("diagnostics"), list)
         else [],
     )
+    type_diagnostics: list[Any] = []
     if as_json:
-        return _check_as_json(clone, written, result, diagnostics), result
-    print(f"Checked {len(files)} file(s); {len(written)} written.")
-    structural = _report(diagnostics)
-    typed = _type_check(clone)
-    # `ty` prints its own verdict, and "All checks passed!" is *its* verdict on
-    # the types --
-    # which now genuinely can be clean while the graph is not, because an
-    # unreachable node no
-    # longer stops the tree from being generated. Left alone, its last line
-    # reads as though
-    # the whole check passed.
-    if structural and not typed:
-        print(
-            "The types are fine; the problems above are not. "
-            "`verdog check` failed."
+        status, type_diagnostics = _check_as_json(
+            clone, written, result, diagnostics
         )
-    return typed or structural, result
+    else:
+        print(f"Checked {len(files)} file(s); {len(written)} written.")
+        structural = _report(diagnostics)
+        typed = _type_check(clone)
+        # `ty`'s verdict only covers types, so clarify structural failures.
+        if structural and not typed:
+            print(
+                "The types are fine; the problems above are not. "
+                "`verdog check` failed."
+            )
+        status = typed or structural
+    if not status:
+        if clone.check_sources() != sources:
+            raise local.WorkspaceError(
+                "project changed during type checking; retry `verdog check`"
+            )
+        clone.write_check_receipt(
+            {
+                "version": 1,
+                "graph_hash": result.get("graph_hash", ""),
+                "diagnostics": diagnostics,
+                "type_diagnostics": type_diagnostics,
+                "sources": sources,
+            }
+        )
+    return status, result
 
 
 def _check_as_json(
@@ -139,7 +166,7 @@ def _check_as_json(
     written: list[str],
     result: dict[str, Any],
     diagnostics: list[Any],
-) -> int:
+) -> tuple[int, list[Any]]:
     """One object on stdout, for a caller that parses rather than reads.
 
     An editor extension and an agent both want the same two things: what is
@@ -165,7 +192,7 @@ def _check_as_json(
         for item in diagnostics
         if isinstance(item, dict)
     )
-    return status or (1 if failed else 0)
+    return status or (1 if failed else 0), typed
 
 
 def _type_check_json(clone: local.Clone) -> tuple[list[Any], int]:

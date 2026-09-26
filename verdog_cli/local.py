@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import json
 import keyword
 import pathlib
@@ -133,6 +134,24 @@ def _objects(value: object) -> tuple[dict[str, Any], ...]:
         for item in cast(list[object], value)
         if isinstance(item, dict)
     )
+
+
+def _source_path(source: dict[str, Any]) -> str | None:
+    relative = source.get("path")
+    if not isinstance(relative, str):
+        return None
+    path = pathlib.Path(relative)
+    if (
+        not path.parts
+        or path.parts[0] == EXTERNAL_ROOT
+        or any(
+            part in {".git", ".venv", ".verdog", "__pycache__"}
+            for part in path.parts
+        )
+        or path.suffix == ".pyc"
+    ):
+        return None
+    return relative
 
 
 def _direct_project_path(root: pathlib.Path, relative: str) -> pathlib.Path:
@@ -356,20 +375,10 @@ class Clone:
                     f"{owner.root / 'project.json'} has no sources"
                 )
             for source in _objects(cast(list[object], sources)):
-                relative = source.get("path")
-                if not isinstance(relative, str):
+                relative = _source_path(source)
+                if relative is None:
                     continue
                 path = pathlib.Path(relative)
-                if (
-                    not path.parts
-                    or path.parts[0] == EXTERNAL_ROOT
-                    or any(
-                        part in {".git", ".venv", ".verdog", "__pycache__"}
-                        for part in path.parts
-                    )
-                    or path.suffix == ".pyc"
-                ):
-                    continue
                 target = _direct_project_path(owner.root, relative)
                 if not target.is_file() and (
                     owner != self or source.get("ownership") == "user"
@@ -377,6 +386,68 @@ class Clone:
                     continue
                 files[(prefix / path).as_posix()] = owner._read(relative)
         return files
+
+    def check_sources(
+        self, *, expected: Mapping[str, str] | None = None
+    ) -> dict[str, str | None]:
+        """Hash checked sources, absent files, and type configuration."""
+        files = self.files()
+        if expected is not None and files != expected:
+            raise WorkspaceError(
+                "project changed after projection; retry `verdog check`"
+            )
+        sources: dict[str, str | None] = {
+            path: hashlib.sha256(content.encode("utf-8")).hexdigest()
+            for path, content in files.items()
+        }
+        for _, owner in dependency_clones(self):
+            prefix = owner.root.relative_to(self.root)
+            for source in _objects(owner.project.get("sources")):
+                relative = _source_path(source)
+                if relative is not None:
+                    _direct_project_path(owner.root, relative)
+                    sources.setdefault((prefix / relative).as_posix(), None)
+            for relative in ("pyproject.toml", "ty.toml"):
+                path = (prefix / relative).as_posix()
+                if path not in sources:
+                    content = _file_bytes(
+                        _direct_project_path(owner.root, relative)
+                    )
+                    sources[path] = (
+                        None
+                        if content is None
+                        else hashlib.sha256(content).hexdigest()
+                    )
+        return sources
+
+    def write_check_receipt(self, receipt: Mapping[str, object] | None) -> None:
+        """Atomically save check success, or invalidate an earlier receipt."""
+        staged: pathlib.Path | None = None
+        try:
+            target = _direct_project_path(self.root, ".verdog/check.json")
+            if receipt is None:
+                target.unlink(missing_ok=True)
+                return
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target.parent,
+                prefix=".check-",
+                suffix=".json",
+                delete=False,
+            ) as stream:
+                staged = pathlib.Path(stream.name)
+                json.dump(receipt, stream, indent=2)
+                stream.write("\n")
+            _direct_project_path(self.root, ".verdog/check.json")
+            staged.replace(target)
+        except OSError as error:
+            raise WorkspaceError(
+                f"check result could not be saved safely: {error}"
+            ) from error
+        finally:
+            if staged is not None:
+                staged.unlink(missing_ok=True)
 
     def graph_files(self) -> dict[str, str]:
         """Read saved manifests for service-side graph analysis."""

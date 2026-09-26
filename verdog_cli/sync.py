@@ -325,6 +325,106 @@ def require_current_environment(
     return environment
 
 
+def require_current_workflow_environments(
+    clone: local.Clone, definition: local.LocalDefinition
+) -> pathlib.Path:
+    """Check reachable workflow environments without importing project code."""
+    visited: set[tuple[pathlib.Path, str, str]] = set()
+
+    def dependency(owner: local.Clone, alias: str) -> local.Clone:
+        if local.package_problem(alias) is not None:
+            raise local.WorkspaceError(f"invalid external alias {alias!r}")
+        root = local.contained_path(
+            owner.root, pathlib.Path(local.external_root(alias))
+        )
+        return local.Clone(root, owner.origin, owner.token)
+
+    def visit(owner: local.Clone, current: local.LocalDefinition) -> None:
+        key = (owner.root.resolve(), current.kind, current.local_id)
+        if key in visited:
+            return
+        visited.add(key)
+        if current.kind == "workflow":
+            try:
+                require_current_environment(owner, current)
+            except local.WorkspaceError as error:
+                raise local.WorkspaceError(f"{owner.root}: {error}") from error
+
+        definitions = owner.local_definitions()
+        workflows = {
+            item.local_id: item
+            for item in definitions
+            if item.kind == "workflow"
+        }
+        external_workflows: dict[str, tuple[str, str]] = {}
+        for subroutine in definitions:
+            if subroutine.kind != "subroutine":
+                continue
+            for binding in subroutine.body["workflows"]:
+                if "external" not in binding:
+                    continue
+                external: object = binding["external"]
+                identifier: object = binding.get("id")
+                if not isinstance(identifier, str) or not isinstance(
+                    external, dict
+                ):
+                    raise local.WorkspaceError("invalid external workflow")
+                fields = cast(dict[str, object], external)
+                alias, workflow = fields.get("alias"), fields.get("workflow")
+                if not isinstance(alias, str) or not isinstance(workflow, str):
+                    raise local.WorkspaceError("invalid external workflow")
+                binding_id = local.definition_child(
+                    subroutine.local_id, identifier
+                )
+                external_workflows[binding_id] = (alias, workflow)
+
+        for subroutine in owner.subroutine_closure(current):
+            for node in subroutine.body["nodes"]:
+                if not isinstance(node, dict):
+                    continue
+                fields = cast(dict[str, object], node)
+                if fields.get("kind") != "workflow_call":
+                    continue
+                operation = fields.get("operation")
+                target = (
+                    cast(dict[str, object], operation).get("target")
+                    if isinstance(operation, dict)
+                    else None
+                )
+                if not isinstance(target, str):
+                    raise local.WorkspaceError("invalid workflow call target")
+                if target in external_workflows:
+                    alias, workflow = external_workflows[target]
+                    child = dependency(owner, alias)
+                    visit(child, child.workflow_definition(workflow))
+                elif target in workflows:
+                    visit(owner, workflows[target])
+                else:
+                    raise local.WorkspaceError(
+                        f"definition {subroutine.id} calls unknown "
+                        f"workflow {target!r}"
+                    )
+
+        for alias, identifier in owner.external_subroutine_targets(current):
+            child = dependency(owner, alias)
+            subroutine_target = next(
+                (
+                    item
+                    for item in child.local_definitions()
+                    if item.kind == "subroutine" and item.local_id == identifier
+                ),
+                None,
+            )
+            if subroutine_target is None:
+                raise local.WorkspaceError(
+                    f"external subroutine {alias}/{identifier} does not exist"
+                )
+            visit(child, subroutine_target)
+
+    visit(clone, definition)
+    return clone.environment(definition)
+
+
 def sync(
     clone: local.Clone,
     *,
