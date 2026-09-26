@@ -120,6 +120,33 @@ def _registered_outputs(
         )
 
 
+def _validate_project(
+    project_root: pathlib.Path,
+    output_dir: pathlib.Path,
+    header: runtime_runs.RunHeader,
+) -> None:
+    if pathlib.Path(header.project_root).resolve() != project_root.resolve():
+        raise runtime_runs.RunStoreError(
+            f"run belongs to another project: {output_dir}",
+            code="run.project_mismatch",
+            details={
+                "output_dir": str(output_dir),
+                "project_root": header.project_root,
+            },
+        )
+
+
+def _resolved_status(
+    output_dir: pathlib.Path, status: runtime_runs.RunStatus
+) -> runtime_runs.RunStatus:
+    if (
+        status is runtime_runs.RunStatus.RUNNING
+        and not runtime_runs.run_is_active(output_dir)
+    ):
+        return runtime_runs.RunStatus.INTERRUPTED
+    return status
+
+
 def _load_record(
     project_root: pathlib.Path, output_dir: pathlib.Path, /
 ) -> RunRecord:
@@ -127,22 +154,13 @@ def _load_record(
     output = output_dir.resolve()
     store = runtime_runs.RunStore(output)
     manifest = store.manifest()
-    if pathlib.Path(manifest.project_root).resolve() != project:
-        raise runtime_runs.RunStoreError(
-            f"run belongs to another project: {output}",
-            code="run.project_mismatch",
-            details={
-                "output_dir": str(output),
-                "project_root": manifest.project_root,
-            },
-        )
-    status = manifest.status
-    if (
-        status is runtime_runs.RunStatus.RUNNING
-        and not runtime_runs.run_is_active(output)
-    ):
-        status = runtime_runs.RunStatus.INTERRUPTED
-    return RunRecord(manifest, output, status, store.checkpoints())
+    _validate_project(project, output, manifest)
+    return RunRecord(
+        manifest,
+        output,
+        _resolved_status(output, manifest.status),
+        store.checkpoints(),
+    )
 
 
 def _updated_sort_key(value: str, /) -> tuple[int, datetime.datetime, str]:
@@ -178,9 +196,7 @@ def discover_runs(project_root: pathlib.Path) -> RunDiscovery:
     return RunDiscovery(tuple(found), tuple(issues))
 
 
-def _workflow_matches(
-    manifest: runtime_runs.RunManifest, requested: str
-) -> bool:
+def _workflow_matches(manifest: runtime_runs.RunHeader, requested: str) -> bool:
     identifiers = {
         manifest.workflow.id,
         manifest.workflow.definition_id,
@@ -218,13 +234,9 @@ def _record_from_path(
     project_root: pathlib.Path,
     reference: str,
     start: pathlib.Path,
-    known: Sequence[RunRecord],
 ) -> RunRecord:
     raw = pathlib.Path(reference).expanduser()
     output = (start / raw).resolve() if not raw.is_absolute() else raw.resolve()
-    existing = next((run for run in known if run.output_dir == output), None)
-    if existing is not None:
-        return existing
     try:
         return _load_record(project_root, output)
     except runtime_runs.RunStoreError as error:
@@ -248,11 +260,12 @@ def select_run(
     start: pathlib.Path | None = None,
 ) -> tuple[RunRecord, RunDiscovery]:
     """Resolve a path, UUID/prefix, or managed directory basename."""
-    discovery = discover_runs(project_root)
     if reference is not None and _path_reference(reference):
-        return _record_from_path(
-            project_root, reference, start or pathlib.Path.cwd(), discovery.runs
-        ), discovery
+        run = _record_from_path(
+            project_root, reference, start or pathlib.Path.cwd()
+        )
+        return run, RunDiscovery((run,), ())
+    discovery = discover_runs(project_root)
     matches = discovery.runs
     if reference is not None:
         matches = tuple(
@@ -370,14 +383,110 @@ def _runs_human(runs: Sequence[RunRecord]) -> str:
     )
 
 
+def _list_brief_runs(
+    clone: local.Clone,
+    *,
+    workflow: str | None,
+    statuses: Sequence[str],
+    outputs: Sequence[pathlib.Path],
+    as_json: bool,
+) -> int:
+    if not hasattr(runtime_runs, "load_run_header"):
+        raise RunCommandError(
+            "This runtime does not support brief run listing. "
+            "Upgrade verdog-cli and verdog-runtime.",
+            code="run.brief_unavailable",
+        )
+    project = clone.root.resolve()
+    issues: list[DiscoveryIssue] = []
+    if outputs:
+        candidates = {output.expanduser().resolve() for output in outputs}
+    else:
+        registered, registry_issue = _registered_outputs(project)
+        candidates = {*_default_outputs(project), *registered}
+        if registry_issue is not None:
+            issues.append(registry_issue)
+    selected: list[tuple[runtime_runs.RunHeader, runtime_runs.RunStatus]] = []
+    for output in sorted(candidates, key=str):
+        try:
+            header = runtime_runs.load_run_header(output)
+            _validate_project(project, output, header)
+            status = _resolved_status(output, header.status)
+        except runtime_runs.RunStoreError as error:
+            if outputs:
+                raise RunCommandError(
+                    str(error), code=error.code, details=error.details
+                ) from error
+            issues.append(_issue(output, error))
+            continue
+        if (workflow is None or _workflow_matches(header, workflow)) and (
+            not statuses or status.value in statuses
+        ):
+            selected.append((header, status))
+    selected.sort(
+        key=lambda item: (*_updated_sort_key(item[0].updated_at), item[0].id),
+        reverse=True,
+    )
+    _warn(issues)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": runtime_runs.RUN_HISTORY_SCHEMA_VERSION,
+                    "operation": "runs",
+                    "brief": True,
+                    "project": str(project),
+                    "runs": [
+                        header.as_summary(status=status)
+                        for header, status in selected
+                    ],
+                },
+                indent=2,
+            )
+        )
+    elif selected:
+        print(
+            _table(
+                ("RUN", "STATUS", "WORKFLOW", "UPDATED", "OUTPUT"),
+                [
+                    (
+                        header.id,
+                        status.value,
+                        header.workflow.id,
+                        header.updated_at,
+                        header.output_dir,
+                    )
+                    for header, status in selected
+                ],
+            )
+        )
+    else:
+        print("No runs found.")
+    return 0
+
+
 def list_runs(
     clone: local.Clone,
     *,
     workflow: str | None = None,
     statuses: Sequence[str] = (),
     as_json: bool = False,
+    brief: bool = False,
+    outputs: Sequence[pathlib.Path] = (),
 ) -> int:
-    """Print matching runs as a compact table or machine-readable JSON."""
+    """Print runs, optionally reading headers without checkpoint histories."""
+    if outputs and not brief:
+        raise RunCommandError(
+            "--output requires --brief", code="run.brief_required"
+        )
+    if brief:
+        return _list_brief_runs(
+            clone,
+            workflow=workflow,
+            statuses=statuses,
+            outputs=outputs,
+            as_json=as_json,
+        )
     discovery = discover_runs(clone.root)
     selected = filtered_runs(
         discovery,

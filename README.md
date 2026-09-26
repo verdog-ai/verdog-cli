@@ -55,6 +55,16 @@ uses the hosted compiler and local Python type checking. `run` launches the runt
 with the selected workflow's interpreter. Run arguments, credentials, backend
 configuration, and run directories retain their existing formats.
 
+`verdog runs --brief --json` lists validated run headers and current liveness
+without loading checkpoint histories or artifact inventories. Its version 1 JSON
+response has `operation: "runs"` and `brief: true`; run summaries omit
+`checkpoints` and `sessions`. Trace activity is independent of the stored header's
+`updated_at` timestamp. Use `--output /path/to/run` (repeatable, with `--brief`)
+to inspect known runs directly without run discovery or registry reads. A recorded
+running run whose execution lock is no longer held is reported as interrupted.
+Load checkpoint details on demand with `verdog checkpoints /path/to/run --json`;
+explicit output paths do not inspect unrelated runs.
+
 A successful `verdog check` (including `--json`) writes a local receipt to
 `.verdog/check.json` for editor integrations. Version 1 records the graph hash,
 diagnostics, and SHA-256 hashes of the checked source/configuration files; absent

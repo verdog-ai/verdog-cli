@@ -534,3 +534,123 @@ def test_lifecycle_commands_forward_explicit_semantics(
     assert fork.checkpoint == 1
     assert fork.sessions == "fresh"
     assert fork.arguments_mode == "checkpoint"
+
+
+@pytest.mark.parametrize("explicit_output", [False, True])
+def test_brief_runs_skip_checkpoints_and_report_liveness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    explicit_output: bool,
+) -> None:
+    import verdog_cli.main as cli
+    from verdog_cli import runs
+
+    clone = _clone(tmp_path)
+    store = _run(
+        clone, clone.root / ".verdog/runs/main/run", identifier="brief-run"
+    )
+    store.commit_checkpoint(_checkpoint(1), shards={"root.pkl": b"state"})
+    saved_header = (store.control_dir / "run.json").read_bytes()
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("brief listing must not load histories or discover paths")
+
+    monkeypatch.setattr(RunStore, "manifest", forbidden)
+    monkeypatch.setattr(RunStore, "checkpoints", forbidden)
+    monkeypatch.setattr(runs, "discover_runs", forbidden)
+    if explicit_output:
+        monkeypatch.setattr(runs, "_default_outputs", forbidden)
+        monkeypatch.setattr(runs, "_registered_outputs", forbidden)
+
+    def open_clone(_path: Path) -> Clone:
+        return clone
+
+    monkeypatch.setattr(cli.local, "open_clone", open_clone)
+    arguments = ["runs", "main", "--brief", "--json"]
+    if explicit_output:
+        arguments.extend(["--output", str(store.output_dir)])
+        # Repeated paths do not duplicate a run in the result.
+        arguments.extend(["--output", str(store.output_dir)])
+    with store.lease():
+        assert cli.main(arguments + ["--status", "running"]) == 0
+        active = json.loads(capsys.readouterr().out)
+        assert active["brief"] is True
+        assert active["operation"] == "runs"
+        assert active["schema_version"] == 1
+        assert active["project"] == str(clone.root)
+        assert len(active["runs"]) == 1
+        summary = active["runs"][0]
+        assert summary["id"] == "brief-run"
+        assert summary["status"] == "running"
+        assert "checkpoints" not in summary
+        assert "sessions" not in summary
+    assert cli.main(arguments) == 0
+    inactive = json.loads(capsys.readouterr().out)
+    assert inactive["runs"][0]["status"] == "interrupted"
+    assert (store.control_dir / "run.json").read_bytes() == saved_header
+
+
+def test_explicit_checkpoint_path_does_not_discover_other_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from verdog_cli import runs
+
+    clone = _clone(tmp_path)
+    store = _run(clone, tmp_path / "selected", identifier="selected")
+    store.commit_checkpoint(_checkpoint(1), shards={"root.pkl": b"state"})
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("explicit checkpoint selection must not discover runs")
+
+    monkeypatch.setattr(runs, "discover_runs", forbidden)
+    assert (
+        list_checkpoints(clone, reference=str(store.output_dir), as_json=True)
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["run"]["id"] == "selected"
+    assert len(result["checkpoints"]) == 1
+
+
+def test_brief_output_rejects_another_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import verdog_cli.main as cli
+
+    clone = _clone(tmp_path)
+    other = Clone(tmp_path / "other", "http://unused", None)
+    other.root.mkdir()
+    store = _run(other, tmp_path / "other-run", identifier="other")
+
+    def open_clone(_path: Path) -> Clone:
+        return clone
+
+    monkeypatch.setattr(cli.local, "open_clone", open_clone)
+    assert (
+        cli.main(
+            ["runs", "--brief", "--json", "--output", str(store.output_dir)]
+        )
+        == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "run.project_mismatch"
+    assert cli.main(["runs", "--json", "--output", str(store.output_dir)]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "run.brief_required"
+
+
+def test_brief_listing_requires_compatible_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from verdog_runtime import runs as runtime_runs
+
+    clone = _clone(tmp_path)
+    monkeypatch.delattr(runtime_runs, "load_run_header")
+    with pytest.raises(RunCommandError, match="Upgrade") as error:
+        list_runs(clone, brief=True)
+    assert error.value.code == "run.brief_unavailable"

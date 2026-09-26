@@ -354,6 +354,8 @@ def _runs(arguments: argparse.Namespace) -> int:
         workflow=arguments.workflow,
         statuses=tuple(arguments.status),
         as_json=arguments.as_json,
+        brief=arguments.brief,
+        outputs=tuple(arguments.output),
     )
 
 
@@ -504,6 +506,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="as_json",
         help="emit one versioned machine-readable run list",
+    )
+    runs.add_argument(
+        "--brief",
+        action="store_true",
+        help="read run headers and liveness without loading checkpoints",
+    )
+    runs.add_argument(
+        "--output",
+        action="append",
+        type=pathlib.Path,
+        default=[],
+        metavar="PATH",
+        help="inspect only this output directory; repeatable, requires --brief",
     )
     runs.set_defaults(handler=_runs, machine_json=True)
 
