@@ -31,6 +31,13 @@ This changes the tool installation, not project dependencies. Retain
 [Getting started](https://drexlerd.github.io/verdog-website/getting-started.html)
 for the extension and a complete example.
 
+CLI 0.1.1 requires `verdog-runtime>=0.1.3,<0.2`. For existing agent profiles, remove
+`options.web_search` from `project.json` and configure search through provider-native
+`extra_args`. Regenerate sources with an updated backend using `verdog generate`
+before running with runtime 0.1.3; previously generated `web_search=False` arguments
+also need regeneration. See the [runtime migration notes](https://github.com/verdog-ai/verdog-runtime#verdog-runtime)
+for provider arguments.
+
 ## Commands
 
 From a workflow project's root:
@@ -128,8 +135,8 @@ Configure a GitHub environment named `pypi` and a PyPI Trusted Publisher for:
 - Workflow: `release.yml`
 - Environment: `pypi`
 
-Publish runtime 0.1.2 before the first CLI release so the declared dependency is
-available. Both the quality and release workflows install the declared runtime
+Publish any newly required runtime version before releasing the CLI so the declared
+dependency is available. Both the quality and release workflows install the runtime
 from the package index; local sibling checkouts are only a development option.
 Build locally with `uv build`.
 
