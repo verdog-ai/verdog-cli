@@ -36,7 +36,7 @@ EXTERNAL_ROOT = "external"
 Shared by dependency paths, type-check exclusions, and drop cleanup.
 """
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 _DEFINITION_SEPARATOR = "__"
 
@@ -49,6 +49,17 @@ def definition_child(owner: str | None, leaf: str, /) -> str:
 def definition_leaf(identifier: str, /) -> str:
     """Return the final component of a nested definition id."""
     return identifier.rsplit(_DEFINITION_SEPARATOR, 1)[-1]
+
+
+def default_root(kind: str, ids: list[str]) -> str:
+    """The root definition used when none is named: the only one, or `main`."""
+    if len(ids) == 1:
+        return ids[0]
+    if "main" in ids:
+        return "main"
+    raise WorkspaceError(
+        f"choose a root {kind} explicitly: {', '.join(ids) or 'none declared'}"
+    )
 
 
 def package_problem(package: str) -> str | None:
@@ -308,11 +319,19 @@ class Clone:
             raise WorkspaceError("project.json is not an object")
         project = cast(dict[str, Any], decoded)
         version = project.get("schema_version")
-        if version != SCHEMA_VERSION:
+        if version == 32:
+            # ponytail: the compiler migrates the file; reading v32 only needs
+            # its single root workflow and subroutine lifted into lists.
+            workflow = project.pop("workflow", None)
+            subroutine = project.pop("subroutine", None)
+            project["schema_version"] = SCHEMA_VERSION
+            project["workflows"] = [] if workflow is None else [workflow]
+            project["subroutines"] = [] if subroutine is None else [subroutine]
+        elif version != SCHEMA_VERSION:
             raise WorkspaceError(
                 f"project schema v"
                 f"{version} is unsupported; this CLI requires schema v"
-                f"{SCHEMA_VERSION}"
+                f"{SCHEMA_VERSION} (or v32)"
             )
         return project
 
@@ -563,18 +582,12 @@ class Clone:
         """Return the declared workflow envelopes and subroutine graphs."""
         project = self.project
         package = project.get("package")
-        root_workflow = project.get("workflow")
-        root_subroutine = project.get("subroutine")
         if (
             not isinstance(package, str)
             or not package
             or package_problem(package) is not None
-            or not isinstance(root_workflow, dict)
-            or not isinstance(root_subroutine, dict)
         ):
-            raise WorkspaceError(
-                "project.json has no root workflow and subroutine"
-            )
+            raise WorkspaceError("project.json has no valid package")
 
         definitions: list[LocalDefinition] = []
         identifiers: set[tuple[Literal["workflow", "subroutine"], str]] = set()
@@ -622,13 +635,18 @@ class Clone:
                 raise WorkspaceError("a local subroutine has no id")
             identifier = definition_child(owner, leaf)
             add(raw, module, "subroutine", identifier)
+            visit_children(raw, module, identifier)
+
+        def visit_children(
+            raw: dict[str, Any], module: str, owner: str | None
+        ) -> None:
             for child in objects(raw.get("workflows"), "workflows"):
                 if "external" in child:
                     continue
                 target = child.get("subroutine")
                 if not isinstance(target, str) or not target:
                     raise WorkspaceError("a local workflow has no subroutine")
-                child_id = definition_child(identifier, definition_leaf(target))
+                child_id = definition_child(owner, definition_leaf(target))
                 add(
                     child,
                     f"{module}.workflows.{definition_leaf(target)}",
@@ -642,26 +660,10 @@ class Clone:
                 visit_subroutine(
                     child,
                     f"{module}.subroutines.{child_id}",
-                    identifier,
+                    owner,
                 )
 
-        workflow_body = cast(dict[str, Any], root_workflow)
-        workflow_id = workflow_body.get("subroutine")
-        subroutine_body = cast(dict[str, Any], root_subroutine)
-        subroutine_id = subroutine_body.get("id")
-        if not isinstance(subroutine_id, str) or not subroutine_id:
-            raise WorkspaceError("the root subroutine has no id")
-        add(
-            workflow_body,
-            f"{package}.workflows.{workflow_id}",
-            "workflow",
-            workflow_id,
-        )
-        visit_subroutine(
-            subroutine_body,
-            f"{package}.subroutines.{subroutine_id}",
-            None,
-        )
+        visit_children(project, package, None)
         return tuple(definitions)
 
     def workflow_definitions(self) -> tuple[LocalDefinition, ...]:
@@ -675,12 +677,17 @@ class Clone:
     def workflow_definition(
         self, identifier: str | None = None, /
     ) -> LocalDefinition:
-        """Select a workflow by local id, defaulting to the first envelope."""
+        """Select a workflow by local id, defaulting per `default_root`."""
         workflows = self.workflow_definitions()
-        if not workflows:
-            raise WorkspaceError("project.json has no workflow")
         if identifier is None:
-            return workflows[0]
+            identifier = default_root(
+                "workflow",
+                [
+                    item.local_id
+                    for item in workflows
+                    if _DEFINITION_SEPARATOR not in item.local_id
+                ],
+            )
         found = next(
             (item for item in workflows if item.local_id == identifier), None
         )

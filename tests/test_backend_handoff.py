@@ -304,6 +304,9 @@ def test_new_projects_persist_the_selected_backend(
     assert received == (
         [f"{expected}/api/v1/check"] if command == "init" else []
     )
+    if command == "init":
+        project = json.loads((destination / "project.json").read_text("utf-8"))
+        assert (project["workflows"], project["subroutines"]) == ([], [])
 
 
 @pytest.mark.parametrize("selection", ["flag", "environment"])

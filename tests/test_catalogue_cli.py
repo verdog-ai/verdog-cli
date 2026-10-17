@@ -72,7 +72,7 @@ def test_describe_json_is_canonical_and_read_only(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert json.loads(captured.out) == {
-        "schema_version": 32,
+        "schema_version": 33,
         "package": "test.project",
         "workflow_id": "main",
         "display_name": "Research workflow",
@@ -114,7 +114,7 @@ def test_describe_json_is_canonical_and_read_only(
         "closure": [],
         "environment": {
             "python": ">=3.12",
-            "schema_version": 32,
+            "schema_version": 33,
             "requirements": ["requests[security]>=2", "zeta>=2"],
         },
     }
@@ -171,7 +171,7 @@ def test_catalogue_client_encodes_filters_and_publication_environment(
         {"name": "Tools"},
         environment={
             "python": ">=3.12",
-            "schema_version": 32,
+            "schema_version": 33,
             "requirements": ["httpx>=0.27"],
         },
     )
@@ -197,7 +197,7 @@ def test_catalogue_client_encodes_filters_and_publication_environment(
                 "preview": {"name": "Tools"},
                 "environment": {
                     "python": ">=3.12",
-                    "schema_version": 32,
+                    "schema_version": 33,
                     "requirements": ["httpx>=0.27"],
                 },
             },
@@ -704,3 +704,25 @@ def test_retract_reports_the_entry_id_after_an_empty_204_response(
     assert captured.out.startswith(f"Retracted catalogue entry {entry_id}.\n")
     assert "@" not in captured.out
     assert retracted == [entry_id]
+
+
+@pytest.mark.parametrize(
+    ("roots", "requested", "expected"),
+    [
+        (["only"], None, "only"),
+        (["left", "main"], None, "main"),
+        (["left", "right"], "right", "right"),
+        (["left", "right"], None, "choose a root subroutine explicitly"),
+    ],
+)
+def test_import_into_defaults_to_the_only_root_subroutine_or_main(
+    roots: list[str], requested: str | None, expected: str
+) -> None:
+    from verdog_cli import manage
+
+    project = {"subroutines": [{"id": root} for root in roots]}
+    if expected.startswith("choose"):
+        with pytest.raises(WorkspaceError, match="left, right"):
+            manage._import_parent(project, requested)  # pyright: ignore[reportPrivateUsage]
+        return
+    assert manage._import_parent(project, requested) == expected  # pyright: ignore[reportPrivateUsage]

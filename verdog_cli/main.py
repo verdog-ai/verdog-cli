@@ -470,7 +470,8 @@ def build_parser() -> argparse.ArgumentParser:
         "workflow",
         nargs="?",
         metavar="WORKFLOW",
-        help="project-local workflow path (the root workflow by default)",
+        help="project-local workflow path (default: the only root workflow, "
+        "else main)",
     )
     execute.add_argument(
         "--output-dir",

@@ -37,9 +37,6 @@ def _objects(value: Any) -> list[dict[str, Any]]:
 def _scoped_subroutine_definitions(
     project: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
-    root = _object(project.get("subroutine"))
-    if not root:
-        return []
     found: list[tuple[str, dict[str, Any]]] = []
 
     def visit(definition: dict[str, Any], owner: str | None) -> None:
@@ -50,7 +47,8 @@ def _scoped_subroutine_definitions(
         for child in _objects(definition.get("subroutines")):
             visit(child, identifier)
 
-    visit(root, None)
+    for root in _objects(project.get("subroutines")):
+        visit(root, None)
     return found
 
 
@@ -208,11 +206,9 @@ def _clone(arguments: argparse.Namespace) -> int:
 
 
 ENTRY_WORKFLOW = "main"
-"""The fixed root workflow/subroutine id.
+"""The root workflow/subroutine id of `blank_graph`'s one-workflow project.
 
-The service uses the same root id. Integration tests run this client's
-output
-through the compiler; the client itself depends only on the public runtime.
+Backend integration tests and fixtures build on it; `init` starts empty.
 """
 
 
@@ -272,44 +268,52 @@ def blank_graph(package: str, name: str) -> dict[str, Any]:
         "schema_version": local.SCHEMA_VERSION,
         "package": package,
         "generated_from": "0" * 64,
-        "workflow": {
-            "subroutine": ENTRY_WORKFLOW,
-            "profiles": [],
-            "sessions": [],
-            "profile_arguments": {},
-            "session_arguments": {},
-        },
-        "subroutine": {
-            "id": ENTRY_WORKFLOW,
-            "name": name,
-            "ports": {"enter": "enter", "exit": "exit", "failure": "failure"},
-            "features": [],
-            "profiles": [],
-            "profile_parameters": [],
-            "sessions": [],
-            "session_parameters": [],
-            "nodes": [
-                port("enter", "Enter"),
-                port("exit", "Exit"),
-                port("failure", "Failure"),
-            ],
-            "edges": [
-                {
-                    "id": "enter__exit",
-                    "name": "Pass through",
-                    "source": "enter",
-                    "target": "exit",
-                    "conditions": [],
-                    "effects": [],
-                }
-            ],
-            "workflows": [],
-            "subroutines": [],
-        },
+        "workflows": [
+            {
+                "subroutine": ENTRY_WORKFLOW,
+                "profiles": [],
+                "sessions": [],
+                "profile_arguments": {},
+                "session_arguments": {},
+            }
+        ],
         "externals": [],
         "sources": [],
         "editor": {"layouts": {}},
         "extensions": {},
+        "subroutines": [
+            {
+                "id": ENTRY_WORKFLOW,
+                "name": name,
+                "ports": {
+                    "enter": "enter",
+                    "exit": "exit",
+                    "failure": "failure",
+                },
+                "features": [],
+                "profiles": [],
+                "profile_parameters": [],
+                "sessions": [],
+                "session_parameters": [],
+                "nodes": [
+                    port("enter", "Enter"),
+                    port("exit", "Exit"),
+                    port("failure", "Failure"),
+                ],
+                "edges": [
+                    {
+                        "id": "enter__exit",
+                        "name": "Pass through",
+                        "source": "enter",
+                        "target": "exit",
+                        "conditions": [],
+                        "effects": [],
+                    }
+                ],
+                "workflows": [],
+                "subroutines": [],
+            }
+        ],
     }
 
 
@@ -355,9 +359,14 @@ def _init(arguments: argparse.Namespace) -> int:
         )
 
     root.mkdir(parents=True, exist_ok=True)
+    # An empty project: root workflows and subroutines are added in the editor.
+    project: dict[str, Any] = {
+        **blank_graph(package, name),
+        "workflows": [],
+        "subroutines": [],
+    }
     (root / "project.json").write_text(
-        json.dumps(blank_graph(package, name), indent=2, ensure_ascii=False)
-        + "\n",
+        json.dumps(project, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     # Git, because every other verb finds the project by walking up to a `.git`.
@@ -372,13 +381,15 @@ def _init(arguments: argparse.Namespace) -> int:
     local.write_config(root, origin)
 
     print(f"Started {package} in {root}")
-    print(f"  workflow {ENTRY_WORKFLOW!r}: enter -> exit, with a failure port")
 
     from verdog_cli import main
 
     status = main.generate_clone(local.open_clone(root))
     if status == 0:
-        print("Next: `verdog sync` to create the runtime environments.")
+        print(
+            "Next: add a subroutine and make it runnable, then run "
+            "`verdog sync` to create its runtime environment."
+        )
     return status
 
 
@@ -582,9 +593,9 @@ def publish_workflow(arguments: argparse.Namespace) -> int:
         )
     repository = f"{owner}/{name}"
     commit = clone_head(clone, repository)
-    root_workflow = _object(clone.project.get("workflow"))
-    workflow = str(arguments.workflow or root_workflow.get("subroutine", ""))
-    descriptor = cli_catalogue.describe_workflow(clone, workflow)
+    descriptor = cli_catalogue.describe_workflow(
+        clone, arguments.workflow or None
+    )
     if arguments.private:
         print(
             "verdog: --private is deprecated; catalogue "
@@ -1065,11 +1076,19 @@ def _prepare_import(arguments: argparse.Namespace) -> _ImportPlan:
 
 
 def _import_parent(project: dict[str, Any], requested: object) -> str:
-    root = _object(project.get("subroutine"))
-    parent = str(requested or root.get("id", ""))
     known = {
         identifier for identifier, _ in _scoped_subroutine_definitions(project)
     }
+    parent = str(
+        requested
+        or local.default_root(
+            "subroutine",
+            [
+                str(root.get("id"))
+                for root in _objects(project.get("subroutines"))
+            ],
+        )
+    )
     if parent not in known:
         raise local.WorkspaceError(f"this project has no subroutine {parent}")
     return parent
@@ -2078,7 +2097,7 @@ def register(commands: Any) -> None:
     who.set_defaults(handler=_whoami)
 
     started = commands.add_parser("init", help="start a new project here")
-    started.add_argument("name", nargs="?", help="what the workflow is called")
+    started.add_argument("name", nargs="?", help="what the project is called")
     started.add_argument(
         "directory", nargs="?", help="where to put it (default: here)"
     )
@@ -2145,7 +2164,8 @@ def register(commands: Any) -> None:
     describe.add_argument(
         "workflow",
         nargs="?",
-        help="project-local workflow path; defaults to the entry workflow",
+        help="project-local workflow path (default: the only root workflow, "
+        "else main)",
     )
     describe.add_argument(
         "--project",
@@ -2171,7 +2191,8 @@ def register(commands: Any) -> None:
     publish.add_argument(
         "workflow",
         nargs="?",
-        help="project-local workflow path; defaults to the entry workflow",
+        help="project-local workflow path (default: the only root workflow, "
+        "else main)",
     )
     publish.add_argument(
         "--private",
@@ -2207,7 +2228,9 @@ def register(commands: Any) -> None:
         "workflow", help="the published workflow path to call"
     )
     imported.add_argument(
-        "--into", help="the project-local subroutine path that declares it"
+        "--into",
+        help="the project-local subroutine path that declares it "
+        "(default: the only root subroutine, else main)",
     )
     imported.add_argument(
         "--alias",

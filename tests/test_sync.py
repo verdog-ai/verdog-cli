@@ -20,6 +20,7 @@ from verdog_cli.local import (
     Clone,
     LocalDefinition,
     WorkspaceError,
+    default_root,
 )
 from verdog_cli.requirements import parse_requirements
 from verdog_cli.sync import (
@@ -100,8 +101,8 @@ def _manifest(
             {
                 "schema_version": SCHEMA_VERSION,
                 "package": package,
-                "workflow": _workflow(cast(str, root_subroutine["id"])),
-                "subroutine": root_subroutine,
+                "workflows": [_workflow(cast(str, root_subroutine["id"]))],
+                "subroutines": [root_subroutine],
                 "externals": [] if externals is None else externals,
                 "sources": [],
             }
@@ -628,7 +629,7 @@ def test_environment_ids_cannot_escape_the_generated_root(
 ) -> None:
     clone = _clone(tmp_path, [])
     project = clone.project
-    project["workflow"]["subroutine"] = "../outside"
+    project["workflows"][0]["subroutine"] = "../outside"
     (clone.root / "project.json").write_text(
         json.dumps(project), encoding="utf-8"
     )
@@ -648,7 +649,7 @@ def test_local_definition_ids_use_the_language_identifier_grammar(
 ) -> None:
     clone = _clone(tmp_path, [])
     project = clone.project
-    project["subroutine"]["subroutines"] = [_subroutine(identifier)]
+    project["subroutines"][0]["subroutines"] = [_subroutine(identifier)]
     (clone.root / "project.json").write_text(
         json.dumps(project), encoding="utf-8"
     )
@@ -777,8 +778,8 @@ def test_sync_visits_every_workflow_in_each_nested_checkout(
 
     # Provision local workflow envelopes independently, also below pins.
     left_project = left_clone.project
-    left_project["subroutine"]["workflows"] = [_workflow("main__other")]
-    left_project["subroutine"]["subroutines"] = [_subroutine("other")]
+    left_project["subroutines"][0]["workflows"] = [_workflow("main__other")]
+    left_project["subroutines"][0]["subroutines"] = [_subroutine("other")]
     (left / "project.json").write_text(
         json.dumps(left_project), encoding="utf-8"
     )
@@ -1521,3 +1522,95 @@ def test_reachable_local_workflow_preflight_handles_recursive_calls(
     monkeypatch.setattr("verdog_cli.sync.require_current_environment", require)
     require_current_workflow_environments(root, _root_definition(root))
     assert checked == ["main", "main__child"]
+
+
+def _roots(root: Path, project: dict[str, Any]) -> Clone:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "project.json").write_text(
+        json.dumps(
+            {"schema_version": SCHEMA_VERSION, "package": "ada.roots"} | project
+        ),
+        encoding="utf-8",
+    )
+    return Clone(root, "http://unused", None)
+
+
+@pytest.mark.parametrize(
+    ("ids", "expected"),
+    [(["one"], "one"), (["alpha", "main", "beta"], "main")],
+)
+def test_default_root_is_the_only_one_or_main(
+    ids: list[str], expected: str
+) -> None:
+    assert default_root("workflow", ids) == expected
+
+
+@pytest.mark.parametrize(
+    ("ids", "listed"),
+    [(["alpha", "beta"], "alpha, beta"), ([], "none declared")],
+)
+def test_default_root_otherwise_asks_for_a_choice(
+    ids: list[str], listed: str
+) -> None:
+    with pytest.raises(
+        WorkspaceError, match=f"choose a root subroutine explicitly: {listed}"
+    ):
+        default_root("subroutine", ids)
+
+
+def test_a_v32_manifest_reads_as_one_root_workflow_and_subroutine(
+    tmp_path: Path,
+) -> None:
+    clone = _roots(
+        tmp_path,
+        {
+            "schema_version": 32,
+            "workflow": _workflow("main"),
+            "subroutine": _subroutine("main"),
+        },
+    )
+    assert clone.project["schema_version"] == SCHEMA_VERSION
+    assert [(item.kind, item.module) for item in clone.local_definitions()] == [
+        ("workflow", "ada.roots.workflows.main"),
+        ("subroutine", "ada.roots.subroutines.main"),
+    ]
+    assert clone.workflow_definition().local_id == "main"
+
+
+def test_empty_and_multi_root_projects_list_their_definitions(
+    tmp_path: Path,
+) -> None:
+    empty = _roots(tmp_path / "empty", {"workflows": [], "subroutines": []})
+    assert empty.local_definitions() == ()
+    with pytest.raises(WorkspaceError, match="none declared"):
+        empty.workflow_definition()
+
+    clone = _roots(
+        tmp_path / "two",
+        {
+            "workflows": [_workflow("left"), _workflow("right")],
+            "subroutines": [
+                _subroutine("left", subroutines=[_subroutine("inner")]),
+                _subroutine("right"),
+            ],
+        },
+    )
+    assert [
+        (item.kind, item.local_id, item.module)
+        for item in clone.local_definitions()
+    ] == [
+        ("workflow", "left", "ada.roots.workflows.left"),
+        ("workflow", "right", "ada.roots.workflows.right"),
+        ("subroutine", "left", "ada.roots.subroutines.left"),
+        (
+            "subroutine",
+            "left__inner",
+            "ada.roots.subroutines.left.subroutines.inner",
+        ),
+        ("subroutine", "right", "ada.roots.subroutines.right"),
+    ]
+    assert clone.workflow_definition("right").local_id == "right"
+    with pytest.raises(
+        WorkspaceError, match="choose a root workflow explicitly: left, right"
+    ):
+        runner.run(clone)
