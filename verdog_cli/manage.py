@@ -1363,33 +1363,10 @@ def _remote_package(repository: str, commit: str) -> str:
     return package if isinstance(package, str) else ""
 
 
-def bump_dependency(arguments: argparse.Namespace) -> int:
-    """Advance a dependency pin without changing its calling graph.
-
-    Validate the requested manifest before changing the checkout. If checkout or
-    manifest updates fail, restore the previous commit and manifest.
-    """
-    clone = _here()
-    project = clone.project
-    alias = str(arguments.alias)
-    complaint = local.package_problem(alias)
-    if complaint:
-        raise local.WorkspaceError(
-            f"{alias!r} cannot be an external alias: {complaint}"
-        )
-    pins = {
-        str(pin.get("alias")): pin for pin in _objects(project.get("externals"))
-    }
-    pin = pins.get(alias)
-    if pin is None:
-        known = ", ".join(sorted(pins)) or "none"
-        raise local.WorkspaceError(
-            f"this project does not pin {alias!r}. Pinned aliases: {known}"
-        )
-    package = str(pin.get("package", ""))
-
-    target_name = local.external_root(alias)
-    target = _external_checkout(clone, alias)
+def _owner_gitlink(
+    clone: local.Clone, target: pathlib.Path, target_name: str
+) -> tuple[str, str]:
+    """The mode and commit of the one gitlink that records the dependency."""
     git_metadata = target / ".git"
     if git_metadata.is_symlink() or not git_metadata.exists():
         raise local.WorkspaceError(
@@ -1424,6 +1401,37 @@ def bump_dependency(arguments: argparse.Namespace) -> int:
             f"{target_name} as one exact, unconflicted gitlink"
         )
     mode, indexed_commit, _ = entries[0][0]
+    return mode, indexed_commit
+
+
+def bump_dependency(arguments: argparse.Namespace) -> int:
+    """Advance a dependency pin without changing its calling graph.
+
+    Validate the requested manifest before changing the checkout. If checkout or
+    manifest updates fail, restore the previous commit and manifest.
+    """
+    clone = _here()
+    project = clone.project
+    alias = str(arguments.alias)
+    complaint = local.package_problem(alias)
+    if complaint:
+        raise local.WorkspaceError(
+            f"{alias!r} cannot be an external alias: {complaint}"
+        )
+    pins = {
+        str(pin.get("alias")): pin for pin in _objects(project.get("externals"))
+    }
+    pin = pins.get(alias)
+    if pin is None:
+        known = ", ".join(sorted(pins)) or "none"
+        raise local.WorkspaceError(
+            f"this project does not pin {alias!r}. Pinned aliases: {known}"
+        )
+    package = str(pin.get("package", ""))
+
+    target_name = local.external_root(alias)
+    target = _external_checkout(clone, alias)
+    mode, indexed_commit = _owner_gitlink(clone, target, target_name)
     head = local.git(target, "rev-parse", "HEAD").strip()
     recorded_commit = str(pin.get("commit", ""))
     if recorded_commit != indexed_commit:

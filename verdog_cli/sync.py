@@ -16,7 +16,7 @@ import sysconfig
 import tempfile
 import tomllib
 import venv
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from typing import cast
 
 import packaging.requirements
@@ -325,6 +325,51 @@ def require_current_environment(
     return environment
 
 
+def _external_workflows(
+    definitions: Iterable[local.LocalDefinition],
+) -> dict[str, tuple[str, str]]:
+    """The (alias, workflow) each external workflow binding names, by id."""
+    external_workflows: dict[str, tuple[str, str]] = {}
+    for subroutine in definitions:
+        if subroutine.kind != "subroutine":
+            continue
+        for binding in subroutine.body["workflows"]:
+            if "external" not in binding:
+                continue
+            external: object = binding["external"]
+            identifier: object = binding.get("id")
+            if not isinstance(identifier, str) or not isinstance(
+                external, dict
+            ):
+                raise local.WorkspaceError("invalid external workflow")
+            fields = cast(dict[str, object], external)
+            alias, workflow = fields.get("alias"), fields.get("workflow")
+            if not isinstance(alias, str) or not isinstance(workflow, str):
+                raise local.WorkspaceError("invalid external workflow")
+            binding_id = local.definition_child(subroutine.local_id, identifier)
+            external_workflows[binding_id] = (alias, workflow)
+    return external_workflows
+
+
+def _workflow_call_targets(subroutine: local.LocalDefinition) -> Iterator[str]:
+    """The targets of the subroutine's workflow calls."""
+    for node in subroutine.body["nodes"]:
+        if not isinstance(node, dict):
+            continue
+        fields = cast(dict[str, object], node)
+        if fields.get("kind") != "workflow_call":
+            continue
+        operation = fields.get("operation")
+        target = (
+            cast(dict[str, object], operation).get("target")
+            if isinstance(operation, dict)
+            else None
+        )
+        if not isinstance(target, str):
+            raise local.WorkspaceError("invalid workflow call target")
+        yield target
+
+
 def require_current_workflow_environments(
     clone: local.Clone, definition: local.LocalDefinition
 ) -> pathlib.Path:
@@ -356,43 +401,10 @@ def require_current_workflow_environments(
             for item in definitions
             if item.kind == "workflow"
         }
-        external_workflows: dict[str, tuple[str, str]] = {}
-        for subroutine in definitions:
-            if subroutine.kind != "subroutine":
-                continue
-            for binding in subroutine.body["workflows"]:
-                if "external" not in binding:
-                    continue
-                external: object = binding["external"]
-                identifier: object = binding.get("id")
-                if not isinstance(identifier, str) or not isinstance(
-                    external, dict
-                ):
-                    raise local.WorkspaceError("invalid external workflow")
-                fields = cast(dict[str, object], external)
-                alias, workflow = fields.get("alias"), fields.get("workflow")
-                if not isinstance(alias, str) or not isinstance(workflow, str):
-                    raise local.WorkspaceError("invalid external workflow")
-                binding_id = local.definition_child(
-                    subroutine.local_id, identifier
-                )
-                external_workflows[binding_id] = (alias, workflow)
+        external_workflows = _external_workflows(definitions)
 
         for subroutine in owner.subroutine_closure(current):
-            for node in subroutine.body["nodes"]:
-                if not isinstance(node, dict):
-                    continue
-                fields = cast(dict[str, object], node)
-                if fields.get("kind") != "workflow_call":
-                    continue
-                operation = fields.get("operation")
-                target = (
-                    cast(dict[str, object], operation).get("target")
-                    if isinstance(operation, dict)
-                    else None
-                )
-                if not isinstance(target, str):
-                    raise local.WorkspaceError("invalid workflow call target")
+            for target in _workflow_call_targets(subroutine):
                 if target in external_workflows:
                     alias, workflow = external_workflows[target]
                     child = dependency(owner, alias)

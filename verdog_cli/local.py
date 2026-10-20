@@ -123,6 +123,30 @@ def cleanup_staging(path: pathlib.Path) -> None:
         )
 
 
+def _clean_after_removal(target: pathlib.Path, root: pathlib.Path) -> None:
+    """Drop a removed module's bytecode and the directories it emptied."""
+    # Cache/directory cleanup is not part of the source transaction.
+    cache = target.parent / "__pycache__"
+    if target.suffix == ".py" and cache.is_dir() and not cache.is_symlink():
+        try:
+            for compiled in cache.glob(f"{target.stem}.*.pyc"):
+                compiled.unlink()
+            cache.rmdir()
+        except OSError:
+            pass
+    _prune_empty_parents(target, root)
+
+
+def _definition_objects(value: object, field: str) -> Iterator[dict[str, Any]]:
+    """The object entries of a definition's ``field`` list."""
+    if not isinstance(value, list):
+        raise WorkspaceError(f"a definition has no {field} list")
+    for item in cast(list[object], value):
+        if not isinstance(item, dict):
+            raise WorkspaceError(f"a definition has an invalid {field} entry")
+        yield cast(dict[str, Any], item)
+
+
 def _prune_empty_parents(path: pathlib.Path, root: pathlib.Path) -> None:
     parent = path.parent
     while parent != root:
@@ -560,22 +584,8 @@ class Clone:
                 cleanup_staging(staging)
 
         for change in changes:
-            if change.after is not None:
-                continue
-            # Cache/directory cleanup is not part of the source transaction.
-            cache = change.target.parent / "__pycache__"
-            if (
-                change.target.suffix == ".py"
-                and cache.is_dir()
-                and not cache.is_symlink()
-            ):
-                try:
-                    for compiled in cache.glob(f"{change.target.stem}.*.pyc"):
-                        compiled.unlink()
-                    cache.rmdir()
-                except OSError:
-                    pass
-            _prune_empty_parents(change.target, root)
+            if change.after is None:
+                _clean_after_removal(change.target, root)
         return sorted(change.path for change in changes)
 
     def local_definitions(self) -> tuple[LocalDefinition, ...]:
@@ -591,16 +601,6 @@ class Clone:
 
         definitions: list[LocalDefinition] = []
         identifiers: set[tuple[Literal["workflow", "subroutine"], str]] = set()
-
-        def objects(value: object, field: str) -> Iterator[dict[str, Any]]:
-            if not isinstance(value, list):
-                raise WorkspaceError(f"a definition has no {field} list")
-            for item in cast(list[object], value):
-                if not isinstance(item, dict):
-                    raise WorkspaceError(
-                        f"a definition has an invalid {field} entry"
-                    )
-                yield cast(dict[str, Any], item)
 
         def add(
             raw: dict[str, Any],
@@ -640,7 +640,7 @@ class Clone:
         def visit_children(
             raw: dict[str, Any], module: str, owner: str | None
         ) -> None:
-            for child in objects(raw.get("workflows"), "workflows"):
+            for child in _definition_objects(raw.get("workflows"), "workflows"):
                 if "external" in child:
                     continue
                 target = child.get("subroutine")
@@ -653,7 +653,9 @@ class Clone:
                     "workflow",
                     child_id,
                 )
-            for child in objects(raw.get("subroutines"), "subroutines"):
+            for child in _definition_objects(
+                raw.get("subroutines"), "subroutines"
+            ):
                 child_id = child.get("id")
                 if not isinstance(child_id, str) or not child_id:
                     raise WorkspaceError("a local subroutine has no id")
