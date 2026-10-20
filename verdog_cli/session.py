@@ -105,6 +105,20 @@ def account(origin: str | None = None) -> api.Service:
     """Authenticate only at the selected destination, without redirecting it."""
     selected = backend_origin() or (validate_origin(origin) if origin else None)
     handoff = os.environ.get("VERDOG_SESSION_TOKEN_STDIN")
+    if handoff is not None:
+        return _handoff_account(selected, handoff)
+    login = load()
+    saved_origin = validate_origin(login.origin)
+    if selected is not None and saved_origin != selected:
+        raise SessionError(
+            f"not signed in to {selected}; run `verdog login {selected}`"
+        )
+    _SAVED_SESSION_ORIGIN.set(selected or saved_origin)
+    return api.Service(selected or saved_origin, login.token)
+
+
+def _handoff_account(selected: str | None, handoff: str) -> api.Service:
+    """Use the editor's stdin session, never saved or project credentials."""
     if handoff == "1":
         inherited = _inherited_origin()
         if inherited is None:
@@ -121,18 +135,9 @@ def account(origin: str | None = None) -> api.Service:
                 "the configured backend changed after receiving its session"
             )
         return client
-    if handoff is not None:
-        raise SessionError(
-            "not signed in to the configured backend; sign in from VS Code"
-        )
-    login = load()
-    saved_origin = validate_origin(login.origin)
-    if selected is not None and saved_origin != selected:
-        raise SessionError(
-            f"not signed in to {selected}; run `verdog login {selected}`"
-        )
-    _SAVED_SESSION_ORIGIN.set(selected or saved_origin)
-    return api.Service(selected or saved_origin, login.token)
+    raise SessionError(
+        "not signed in to the configured backend; sign in from VS Code"
+    )
 
 
 def gh_token() -> str | None:
@@ -302,19 +307,7 @@ def sign_in(
     """Exchange a GitHub token, read here unless given, without storing it."""
     origin = validate_origin(origin)
     if token is None:
-        print(DISCLOSURE)
-        print(f"Signing in to {origin}")
-        try:
-            token = (
-                sys.stdin.read(1025)
-                if from_stdin
-                else getpass.getpass("GitHub access token (input hidden): ")
-            ).strip()
-        except EOFError as error:
-            raise SessionError(
-                "no GitHub token received; sign in from VS Code or supply a "
-                "token"
-            ) from error
+        token = _read_github_token(origin, from_stdin=from_stdin)
     if (
         not token
         or len(token) > 512
@@ -326,6 +319,25 @@ def sign_in(
     answer = api.Service(origin).json(
         "POST", "/api/v1/auth/github", {"access_token": token}
     )
+    return _login_from(origin, answer)
+
+
+def _read_github_token(origin: str, *, from_stdin: bool) -> str:
+    print(DISCLOSURE)
+    print(f"Signing in to {origin}")
+    try:
+        return (
+            sys.stdin.read(1025)
+            if from_stdin
+            else getpass.getpass("GitHub access token (input hidden): ")
+        ).strip()
+    except EOFError as error:
+        raise SessionError(
+            "no GitHub token received; sign in from VS Code or supply a token"
+        ) from error
+
+
+def _login_from(origin: str, answer: dict[str, Any]) -> Login:
     session_token = answer.get("session_token")
     user = answer.get("user")
     login = (

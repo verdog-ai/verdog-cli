@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import json
 import pathlib
 import subprocess
@@ -649,7 +650,34 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parsed.project_arguments = project_arguments
     if parsed.command == "restart":
         parsed.arguments_overridden = arguments_overridden
+    parsed.handler = functools.partial(_renewing_session, parsed.handler)
     return parsed
+
+
+def _renewing_session(
+    handler: Callable[[argparse.Namespace], int], arguments: argparse.Namespace
+) -> int:
+    """Run a command, once more after renewing an expired session via gh.
+
+    An expired saved session fails on its first authenticated request, so
+    rerunning the command repeats nothing the service accepted.
+    """
+    try:
+        return handler(arguments)
+    except api.ServiceError as error:
+        if error.code != "auth.required" or not session.renew_through_gh():
+            raise
+    try:
+        return handler(arguments)
+    except api.ServiceError as error:
+        if error.code != "auth.required":
+            raise
+        raise api.ServiceError(
+            f"{error}\nrun `verdog login` to sign in again",
+            code=error.code,
+            details=error.details,
+            machine_message=error.machine_message,
+        ) from error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -663,27 +691,7 @@ def main(argv: list[str] | None = None) -> int:
             handler = cast(
                 Callable[[argparse.Namespace], int], arguments.handler
             )
-            try:
-                return handler(arguments)
-            except api.ServiceError as error:
-                # An expired saved session fails on its first authenticated
-                # request, so rerunning the command once repeats nothing that
-                # the service accepted.
-                if error.code != "auth.required" or not (
-                    session.renew_through_gh()
-                ):
-                    raise
-            try:
-                return handler(arguments)
-            except api.ServiceError as error:
-                if error.code != "auth.required":
-                    raise
-                raise api.ServiceError(
-                    f"{error}\nrun `verdog login` to sign in again",
-                    code=error.code,
-                    details=error.details,
-                    machine_message=error.machine_message,
-                ) from error
+            return handler(arguments)
     except (
         api.ServiceError,
         local.WorkspaceError,
