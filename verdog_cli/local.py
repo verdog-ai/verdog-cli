@@ -123,6 +123,27 @@ def cleanup_staging(path: pathlib.Path) -> None:
         )
 
 
+def _apply_projection(
+    root: pathlib.Path,
+    changes: list[_FileChange],
+    attempted: list[_FileChange],
+) -> None:
+    """Apply the staged changes, recording each one in ``attempted`` first."""
+    for change in changes:
+        _direct_project_path(root, change.path)
+        if _file_bytes(change.target) != change.before:
+            raise WorkspaceError(
+                f"projection destination changed: "
+                f"{change.path}; retry the command"
+            )
+        attempted.append(change)
+        if change.after is None:
+            change.target.unlink()
+        else:
+            change.target.parent.mkdir(parents=True, exist_ok=True)
+            change.staged.replace(change.target)
+
+
 def _clean_after_removal(target: pathlib.Path, root: pathlib.Path) -> None:
     """Drop a removed module's bytecode and the directories it emptied."""
     # Cache/directory cleanup is not part of the source transaction.
@@ -554,19 +575,7 @@ class Clone:
         try:
             changes = _stage_projection(files, targets, expected, staging)
             require_current()
-            for change in changes:
-                _direct_project_path(root, change.path)
-                if _file_bytes(change.target) != change.before:
-                    raise WorkspaceError(
-                        f"projection destination changed: "
-                        f"{change.path}; retry the command"
-                    )
-                attempted.append(change)
-                if change.after is None:
-                    change.target.unlink()
-                else:
-                    change.target.parent.mkdir(parents=True, exist_ok=True)
-                    change.staged.replace(change.target)
+            _apply_projection(root, changes, attempted)
         except BaseException as error:
             failures = _rollback_projection(root, attempted)
             if failures:

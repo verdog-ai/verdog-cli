@@ -397,6 +397,19 @@ def test_bump_finds_the_newest_release_by_repository_field(
     ]
 
 
+def test_bump_resolves_and_checks_the_requested_commit() -> None:
+    from verdog_cli import manage
+
+    requested = manage._requested_commit  # pyright: ignore[reportPrivateUsage]
+    head, newest = "a" * 40, "B" * 40
+    assert requested("", lambda: newest, "x", head, head) == "b" * 40
+    assert requested("A" * 40, lambda: newest, "x", head, head) == head
+    with pytest.raises(WorkspaceError, match="full 40-character id"):
+        requested("abc", lambda: newest, "x", head, head)
+    with pytest.raises(WorkspaceError, match="Restore one of those"):
+        requested("c" * 40, lambda: newest, "x", "d" * 40, head)
+
+
 def test_owned_unpublished_import_reads_package_before_project_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

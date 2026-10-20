@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from typing import Any, cast
 
 from verdog_cli import api, local, session
@@ -1363,10 +1364,8 @@ def _remote_package(repository: str, commit: str) -> str:
     return package if isinstance(package, str) else ""
 
 
-def _owner_gitlink(
-    clone: local.Clone, target: pathlib.Path, target_name: str
-) -> tuple[str, str]:
-    """The mode and commit of the one gitlink that records the dependency."""
+def _require_own_worktree(target: pathlib.Path, target_name: str) -> None:
+    """Refuse a dependency checkout that is not its own initialized worktree."""
     git_metadata = target / ".git"
     if git_metadata.is_symlink() or not git_metadata.exists():
         raise local.WorkspaceError(
@@ -1383,6 +1382,12 @@ def _owner_gitlink(
     if top_level != target.resolve():
         raise local.WorkspaceError(f"{target_name} is not its own Git worktree")
 
+
+def _owner_gitlink(
+    clone: local.Clone, target: pathlib.Path, target_name: str
+) -> tuple[str, str]:
+    """The mode and commit of the one gitlink that records the dependency."""
+    _require_own_worktree(target, target_name)
     listed = local.git(clone.root, "ls-files", "--stage", "--", target_name)
     entries: list[tuple[list[str], str]] = []
     for line in listed.splitlines():
@@ -1404,15 +1409,8 @@ def _owner_gitlink(
     return mode, indexed_commit
 
 
-def bump_dependency(arguments: argparse.Namespace) -> int:
-    """Advance a dependency pin without changing its calling graph.
-
-    Validate the requested manifest before changing the checkout. If checkout or
-    manifest updates fail, restore the previous commit and manifest.
-    """
-    clone = _here()
-    project = clone.project
-    alias = str(arguments.alias)
+def _bump_pin(project: dict[str, Any], alias: str) -> dict[str, Any]:
+    """The project's pin of the external ``alias``."""
     complaint = local.package_problem(alias)
     if complaint:
         raise local.WorkspaceError(
@@ -1427,13 +1425,17 @@ def bump_dependency(arguments: argparse.Namespace) -> int:
         raise local.WorkspaceError(
             f"this project does not pin {alias!r}. Pinned aliases: {known}"
         )
-    package = str(pin.get("package", ""))
+    return pin
 
-    target_name = local.external_root(alias)
-    target = _external_checkout(clone, alias)
-    mode, indexed_commit = _owner_gitlink(clone, target, target_name)
-    head = local.git(target, "rev-parse", "HEAD").strip()
-    recorded_commit = str(pin.get("commit", ""))
+
+def _require_recorded_checkout(
+    target: pathlib.Path,
+    target_name: str,
+    alias: str,
+    recorded_commit: str,
+    indexed_commit: str,
+) -> None:
+    """Refuse a pin its owner disagrees with, or a checkout with local work."""
     if recorded_commit != indexed_commit:
         raise local.WorkspaceError(
             f"project.json records "
@@ -1458,12 +1460,16 @@ def bump_dependency(arguments: argparse.Namespace) -> int:
             "bumping with `--commit`."
         )
 
-    owner, name = str(pin.get("owner")), str(pin.get("name"))
-    repository = f"{owner}/{name}"
-    workflow = _pinned_workflow(clone, alias)
-    commit = str(arguments.commit or "")
-    if not commit:
-        commit = _newest_release(clone, repository, workflow)
+
+def _requested_commit(
+    requested: str,
+    newest: Callable[[], str],
+    target_name: str,
+    head: str,
+    indexed_commit: str,
+) -> str:
+    """The full, lowercase commit to bump to: ``requested`` or the newest."""
+    commit = requested or newest()
     if re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         raise local.WorkspaceError("give the commit as a full 40-character id")
     commit = commit.lower()
@@ -1474,24 +1480,13 @@ def bump_dependency(arguments: argparse.Namespace) -> int:
             f"{commit[:12]}. Restore one of those "
             "commits before bumping."
         )
-    if commit == recorded_commit:
-        print(f"{alias} is already at {commit[:12]}.")
-        return 0
+    return commit
 
-    # The same pre-flight an import does, and for the same reason: a commit
-    # nobody published is
-    # one nobody else can fetch, so a pin naming it is a project only this
-    # machine can build.
-    entry = _client(clone).preflight(repository, commit, workflow)
-    if str(entry.get("package", package)) != package:
-        raise local.WorkspaceError(
-            f"{repository}@"
-            f"{commit[:12]} publishes "
-            f"{entry.get('package')!r}, not "
-            f"{package!r}. A "
-            "package rename is not a bump: the name is in every generated path."
-        )
 
+def _fetch_dependency_commit(
+    target: pathlib.Path, repository: str, commit: str
+) -> None:
+    """Fetch ``commit`` into the checkout and require its project.json."""
     local.git_with_ssh_fallback(
         target,
         "fetch",
@@ -1512,6 +1507,58 @@ def bump_dependency(arguments: argparse.Namespace) -> int:
         raise local.WorkspaceError(
             f"{repository}@{commit[:12]} has no readable project.json"
         ) from error
+
+
+def bump_dependency(arguments: argparse.Namespace) -> int:
+    """Advance a dependency pin without changing its calling graph.
+
+    Validate the requested manifest before changing the checkout. If checkout or
+    manifest updates fail, restore the previous commit and manifest.
+    """
+    clone = _here()
+    project = clone.project
+    alias = str(arguments.alias)
+    pin = _bump_pin(project, alias)
+    package = str(pin.get("package", ""))
+
+    target_name = local.external_root(alias)
+    target = _external_checkout(clone, alias)
+    mode, indexed_commit = _owner_gitlink(clone, target, target_name)
+    head = local.git(target, "rev-parse", "HEAD").strip()
+    recorded_commit = str(pin.get("commit", ""))
+    _require_recorded_checkout(
+        target, target_name, alias, recorded_commit, indexed_commit
+    )
+
+    owner, name = str(pin.get("owner")), str(pin.get("name"))
+    repository = f"{owner}/{name}"
+    workflow = _pinned_workflow(clone, alias)
+    commit = _requested_commit(
+        str(arguments.commit or ""),
+        lambda: _newest_release(clone, repository, workflow),
+        target_name,
+        head,
+        indexed_commit,
+    )
+    if commit == recorded_commit:
+        print(f"{alias} is already at {commit[:12]}.")
+        return 0
+
+    # The same pre-flight an import does, and for the same reason: a commit
+    # nobody published is
+    # one nobody else can fetch, so a pin naming it is a project only this
+    # machine can build.
+    entry = _client(clone).preflight(repository, commit, workflow)
+    if str(entry.get("package", package)) != package:
+        raise local.WorkspaceError(
+            f"{repository}@"
+            f"{commit[:12]} publishes "
+            f"{entry.get('package')!r}, not "
+            f"{package!r}. A "
+            "package rename is not a bump: the name is in every generated path."
+        )
+
+    _fetch_dependency_commit(target, repository, commit)
 
     project_before = (clone.root / "project.json").read_bytes()
     head_reference = _quiet_git_output(target, "symbolic-ref", "-q", "HEAD")
