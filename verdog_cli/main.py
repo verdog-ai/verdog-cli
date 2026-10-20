@@ -663,7 +663,27 @@ def main(argv: list[str] | None = None) -> int:
             handler = cast(
                 Callable[[argparse.Namespace], int], arguments.handler
             )
-            return handler(arguments)
+            try:
+                return handler(arguments)
+            except api.ServiceError as error:
+                # An expired saved session fails on its first authenticated
+                # request, so rerunning the command once repeats nothing that
+                # the service accepted.
+                if error.code != "auth.required" or not (
+                    session.renew_through_gh()
+                ):
+                    raise
+            try:
+                return handler(arguments)
+            except api.ServiceError as error:
+                if error.code != "auth.required":
+                    raise
+                raise api.ServiceError(
+                    f"{error}\nrun `verdog login` to sign in again",
+                    code=error.code,
+                    details=error.details,
+                    machine_message=error.machine_message,
+                ) from error
     except (
         api.ServiceError,
         local.WorkspaceError,

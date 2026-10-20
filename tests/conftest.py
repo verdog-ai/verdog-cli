@@ -15,6 +15,7 @@ def isolate_service_access(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("VERDOG_BACKEND_ORIGIN", raising=False)
     monkeypatch.delenv("VERDOG_SESSION_TOKEN_STDIN", raising=False)
+    monkeypatch.setenv("VERDOG_NO_GH_LOGIN", "1")  # never run the real gh
     session._stdin_account.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
     def unexpected_request(*_args: object, **_kwargs: object) -> Never:
