@@ -136,9 +136,12 @@ def test_terminal_login_origin_precedence(
     if configured:
         monkeypatch.setenv("VERDOG_BACKEND_ORIGIN", configured)
 
-    def signed_in(origin: str, *, from_stdin: bool) -> Login:
+    def signed_in(
+        origin: str, *, from_stdin: bool, token: str | None = None
+    ) -> Login:
         assert origin == expected
         assert not from_stdin
+        assert token is None
         return Login(origin, "terminal-session", "ada")
 
     monkeypatch.setattr("verdog_cli.session.sign_in", signed_in)

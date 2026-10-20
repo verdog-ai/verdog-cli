@@ -96,6 +96,15 @@ available. Both modes exclude saved terminal and project credentials. A command
 override cannot relabel an incoming session token for another origin. Omit the
 marker for standalone saved-session authentication.
 
+`verdog login` exchanges a GitHub token for a service session saved in
+`~/.config/verdog/session.json`; the GitHub token itself is not stored. The
+service ends a session after 8 hours idle or 7 days. When a saved session has
+expired and `gh` is signed in, the CLI exchanges `gh auth token` for a new
+session, stores it, and retries the command once; set `VERDOG_NO_GH_LOGIN=1`
+to turn this off. `verdog login --gh` signs in with gh's token explicitly.
+Unattended agents should use a project token (`verdog token create`, 90 days)
+instead; project tokens and editor sessions are never renewed through gh.
+
 Use `verdog --help` or `verdog <command> --help` for the full command interface.
 
 ## Development

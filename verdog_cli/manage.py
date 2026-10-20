@@ -108,12 +108,21 @@ def _here() -> local.Clone:
 
 
 def _login(arguments: argparse.Namespace) -> int:
-    """Exchange a GitHub token from the terminal or stdin."""
+    """Exchange a GitHub token from the terminal, stdin, or gh."""
+    token = None
+    if arguments.gh:
+        print(session.DISCLOSURE)
+        token = session.gh_token()
+        if token is None:
+            raise session.SessionError(
+                "`gh auth token` failed; run `gh auth login` first"
+            )
     login = session.sign_in(
         str(
             arguments.origin or session.backend_origin() or local.DEFAULT_ORIGIN
         ),
         from_stdin=bool(arguments.github_token_stdin),
+        token=token,
     )
     path = session.store(login)
     print(f"Signed in as {login.login}. Session stored in {path}.")
@@ -2082,11 +2091,17 @@ def register(commands: Any) -> None:
     login.add_argument(
         "origin", nargs="?", help="service origin (or VERDOG_BACKEND_ORIGIN)"
     )
-    login.add_argument(
+    source = login.add_mutually_exclusive_group()
+    source.add_argument(
         "--github-token-stdin",
         action="store_true",
         help="read an existing GitHub token from stdin "
         "instead of prompting (used by VS Code)",
+    )
+    source.add_argument(
+        "--gh",
+        action="store_true",
+        help="use the GitHub token of the gh CLI instead of prompting",
     )
     login.set_defaults(handler=_login)
 
