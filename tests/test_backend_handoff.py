@@ -228,7 +228,7 @@ def test_service_refuses_redirects_of_tokens_and_bodies(
             self.end_headers()
             self.wfile.write(b"{}")
 
-        do_POST = do_GET
+        do_POST = do_GET  # noqa: N815 - HTTP handler name
 
         @override
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
