@@ -353,7 +353,7 @@ wheels = [
 
 [[package]]
 name = "verdog-cli"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "packaging" },
@@ -377,7 +377,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=23.2" },
     { name = "tabulate", specifier = ">=0.10" },
     { name = "ty", specifier = "==0.0.72" },
-    { name = "verdog-runtime", specifier = ">=0.1.6,<0.2" },
+    { name = "verdog-runtime", specifier = ">=0.1.9,<0.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -392,7 +392,7 @@ dev = [
 
 [[package]]
 name = "verdog-runtime"
-version = "0.1.7"
+version = "0.1.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
@@ -400,7 +400,7 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "tyro" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/61/c4851bed1ceffa2248e33e80fecfec0b8cefedb4e55da72b12adc803930b/verdog_runtime-0.1.7.tar.gz", hash = "sha256:70516bbd89aced515b0d6889bc424c405c46939db67166c043248a44ded6edda", size = 255325, upload-time = "2026-10-17T17:32:20.596Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/38/af6204061c03f09495c3c72fd5c914f2cae7e7a88480dc3bfc706347fc89/verdog_runtime-0.1.9.tar.gz", hash = "sha256:f3886d9f8e6dcc037cc75cffce9c308fb2f7b91494f440854b357386ebe13679", size = 259157, upload-time = "2026-11-01T22:57:13.197Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/00/fc8502743056d816d6a447702ad5f5b42c13647878652f1f572c43d7d5bf/verdog_runtime-0.1.7-py3-none-any.whl", hash = "sha256:740e9cef4e95c3d73ab13ce33d685c6f716d7179bfb7a5524db23cf8c9cccb64", size = 166039, upload-time = "2026-10-17T17:32:18.851Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/0a/bb6846499c7b84301c93de5c44c3c9d8a0ea6a81c50fb68abe3f44837334/verdog_runtime-0.1.9-py3-none-any.whl", hash = "sha256:d30a8ef9608808bd6dd7e16938da81a7603591c228f5ea8ee8d798be1853398d", size = 168558, upload-time = "2026-11-01T22:57:11.562Z" },
 ]
