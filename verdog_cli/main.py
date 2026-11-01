@@ -346,6 +346,7 @@ def _run(arguments: argparse.Namespace) -> int:
         workflow_id=arguments.workflow,
         arguments=tuple(arguments.project_arguments),
         checkpointing=arguments.checkpointing,
+        preflight=not arguments.skip_preflight,
     )
 
 
@@ -484,6 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("off", "auto", "required"),
         default="auto",
         help="checkpoint completed boundaries (default: auto)",
+    )
+    execute.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="do not first run `true` in each Codex profile's sandbox",
     )
     execute.set_defaults(handler=_run)
 
